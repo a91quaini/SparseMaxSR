@@ -1,0 +1,22 @@
+# —— Julia ———————————————————————————————————————————————
+*.jl.cov                # coverage reports
+.julia/                 # local Julia packages
+logs/                   # REPL logs
+
+# Pkg artifacts + build
+/deps/
+/build/
+/Manifest.toml          # if you prefer not committing it
+/.vscode/               # editor settings
+*.egg                   
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code history
+.history/
+
+# docs build
+/docs/build/
+

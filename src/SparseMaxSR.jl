@@ -1,15 +1,16 @@
 module SparseMaxSR
 
-using JuMP
-using Random, LinearAlgebra
-using DataFrames, CSV
-using StatsBase
-using LaTeXStrings
-using Suppressor           # for @suppress in tests / demos
-# Bridging packages for solvers
-import CPLEX, Mosek
+using JuMP, CPLEX, MosekTools, LinearAlgebra, Random
 
-# ──────────────────────────────────────────────────────────
-# Public API
+include("inner_problem.jl")
+include("hillclimb.jl")
+include("socp_relaxation.jl")
+include("cutting_plane.jl")
 
-end # module
+export
+  inner_dual,
+  portfolios_hillclimb,
+  portfolios_socp,
+  cutting_plane_portfolio
+
+end

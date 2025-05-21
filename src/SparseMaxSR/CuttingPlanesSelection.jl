@@ -1,3 +1,5 @@
+module CuttingPlanesSelection
+
 using LinearAlgebra
 using JuMP
 using CPLEX                              # CPLEX.Optimizer
@@ -5,7 +7,7 @@ import MathOptInterface                  # for status constants and callbacks
 const MOI = MathOptInterface
 
 # bring in the utils submodule:
-using .CuttingPlanesUtils:
+using ..CuttingPlanesUtils:
     inner_dual,
     hillclimb,
     portfolios_socp,
@@ -17,6 +19,8 @@ using .CuttingPlanesUtils:
 
 using JuMP: @build_constraint, callback_value
 import MathOptInterface: LazyConstraint, LazyConstraintCallback, submit
+
+export cutting_planes_selection
 
 """
     cutting_planes_selection(μ, Σ, γ, k;
@@ -149,4 +153,6 @@ function cutting_planes_selection(
     selection = findall(x-> x > 0.5, zvals)
 
     return selection, status
+end
+
 end

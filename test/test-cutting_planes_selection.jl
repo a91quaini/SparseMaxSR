@@ -1,9 +1,11 @@
 using Test
-using SparseMaxSR
+using SparseMaxSR: cutting_planes_selection
 using LinearAlgebra   # for I
 using Random          # for reproducibility
 import MathOptInterface
 const MOI = MathOptInterface
+
+# import SparseMaxSR.CuttingPlanesUtils: inner_dual
 
 @testset "cutting_planes_selection" begin
     # make RNG deterministic for warm starts / heuristics
@@ -33,7 +35,7 @@ const MOI = MathOptInterface
             @test status == MOI.OPTIMAL                # successful solve
 
             # Optional: verify inner_dual status on the returned support
-            result = inner_dual(μ, Σ, sel)
+            # result = inner_dual(μ, Σ, sel)
             # @test result.status == MOI.OPTIMAL
         end
     end

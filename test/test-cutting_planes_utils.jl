@@ -5,7 +5,7 @@ import MathOptInterface     # for OPTIMAL
 
 const MOI = MathOptInterface
 
-import SparseMaxSR.CuttingPlanes.CuttingPlanesUtils:  
+import SparseMaxSR.CuttingPlanesUtils:  
     inner_dual,
     hillclimb,
     portfolios_socp,

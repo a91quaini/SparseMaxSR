@@ -1,7 +1,6 @@
 module SharpeRatio
 
 using LinearAlgebra
-using LinearSolve
 
 export compute_sr, compute_mve_sr
 
@@ -46,6 +45,7 @@ function compute_sr(
         w_sel = weights[selection]
     end
 
+    # compute Sharpe ratio
     return dot(w_sel, μ_sel) / sqrt(dot(w_sel, Σ_sel * w_sel))
 end
 
@@ -87,10 +87,11 @@ function compute_mve_sr(
         w_sel = weights[selection]
     end
 
-    # set up and solve linear problem
-    prob = LinearProblem(Σ_sel, μ_sel)
-    sol  = solve(prob, KrylovJL_CG())
-    return sqrt(dot(μ_sel, sol.u))
+    x = isposdef(Σ_sel) ? 
+          cholesky(Σ_sel) \ μ_sel :    # SPD case
+          pinv(Σ_sel) * μ_sel          # PSD (singular) case
+    # compute MVE Sharpe ratio
+    return sqrt(dot(μ_sel, x))
 end
 
 end # module SharpeRatio

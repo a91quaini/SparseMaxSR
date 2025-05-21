@@ -1,12 +1,25 @@
 name = "SparseMaxSR"
 uuid = "67da26f7-3efd-406f-8ecf-6571d1bf31c7"
+license = "MIT"
 authors = ["a91quaini <alberto91quaini@gmail.com>"]
 version = "0.1.0"
-license = "MIT"
 
 [deps]
-JuMP = "4076af6c-2f12-5b6e-843f-3e06a7737acf"
-CPLEX = "862f44e3-83d0-5df8-b5cc-72a7953bc3a1"
-MosekTools = "bcd53414-5796-5a50-9f5f-6b15e3733efb"
-LinearAlgebra = "37e2e46d-f89d-539d-b5b5-2b12d9bcd32d"  # stdlib, but explicit is fine
-Random = "9a3f8284-2f6b-5d18-9a3a-3d9fe51a7b76"
+CPLEX = "a076750e-1247-5638-91d2-ce28b192dca0"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
+MosekTools = "1ec41992-ff65-5c91-ac43-2df89e9693a4"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+CPLEX = "1.1.1"
+JuMP = "1.25.0"
+LinearAlgebra = "1.11.0"
+MathOptInterface = "1.40.0"
+MosekTools = "0.15.9"
+Random = "1.11.0"
+Statistics = "1.11.1"
+Test = "1.11.0"

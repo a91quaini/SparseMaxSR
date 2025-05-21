@@ -1,16 +1,17 @@
 module SparseMaxSR
 
-using JuMP, CPLEX, MosekTools, LinearAlgebra, Random
+# bring in the CuttingPlane submodule
+include("CuttingPlane.jl")
+using .CuttingPlane
 
-include("inner_problem.jl")
-include("hillclimb.jl")
-include("socp_relaxation.jl")
-include("cutting_plane.jl")
+# now re-export everything (or selectively if you prefer)
+export inner_dual,
+       hillclimb,
+       portfolios_socp,
+       portfolios_objective,
+       get_warm_start,
+       cplex_misocp_relaxation,
+       kelley_primal_cuts,
+       cutting_planes_portfolios
 
-export
-  inner_dual,
-  portfolios_hillclimb,
-  portfolios_socp,
-  cutting_plane_portfolio
-
-end
+end # module

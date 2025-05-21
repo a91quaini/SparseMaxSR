@@ -26,18 +26,35 @@ import MathOptInterface: LazyConstraint, LazyConstraintCallback, submit
                              use_warm_start=true,
                              use_socp_lb=false,
                              use_heuristic=true,
-                             use_kelley_primal=false)
+                             use_kelley_primal=false,
+                             do_checks=false)
 
-Outer‐approximation cutting‐plane solver for the ℓ₀‐constrained max‐Sharpe
+Outer-approximation cutting-plane solver for the ℓ₀-constrained max-Sharpe
 problem.
 
-# Returns
-- `selection::Vector{Int}` : the indices of the k selected assets.
-- `status`                : the MOI termination status of the solve.
+# Arguments
+- `μ::Vector{Float64}`: Expected returns vector of length n.
+- `Σ::Matrix{Float64}`: Covariance matrix (n×n) of asset returns.
+- `γ::Vector{Float64}`: Linear risk aversion coefficients of length n.
+- `k::Int`: Number of assets to select (must satisfy 1 ≤ k ≤ n).
+- `ΔT_max::Float64`: Time limit for the solver in seconds.
+- `gap::Float64`: Relative MIP optimality gap tolerance.
+- `num_random_restarts::Int`: Number of random restarts for the warm-start heuristic.
+- `use_warm_start::Bool`: If true, computes an initial feasible solution using random restarts to warm-start the OA cuts.
+- `use_socp_lb::Bool`: If true, adds a second-order conic relaxation lower-bound cut via CPLEX's MI-SOCP.
+- `use_heuristic::Bool`: If true, applies a hill-climbing heuristic at each OA callback to generate additional cuts.
+- `use_kelley_primal::Bool`: If true, adds Kelley’s primal cutting-plane cuts at the root node using a user-specified number of iterations.
+- `do_checks::Bool`: If true, asserts that all input arguments meet required conditions (e.g., dimensions, ranges).
 
-All keyword arguments and logic (warm‐start, SOC‐P bound, heuristic cuts
-and Kelley primal cuts) are identical to the original
-`cutting_planes_portfolios`.
+# Returns
+- `selection::Vector{Int}`: Indices of the k selected assets.
+- `status`: MOI termination status of the optimization.
+
+# Description of optional operations
+- **Warm-start**: Provides an initial feasible solution using multiple random restarts, improving convergence by adding an initial OA cut.
+- **SOCP lower-bound**: Uses a mixed-integer second-order cone relaxation to obtain a fractional bound and adds a corresponding OA cut.
+- **Heuristic**: At each lazy-OA callback, a hill-climbing local search refines the current binary solution to generate stronger cuts.
+- **Kelley primal**: At the root node, iteratively solves primal subproblems to generate Kelley-style cuts that tighten the LP relaxation early.
 """
 function cutting_planes_selection(
     μ::Vector{Float64},
@@ -51,11 +68,17 @@ function cutting_planes_selection(
     use_socp_lb::Bool=false,
     use_heuristic::Bool=true,
     use_kelley_primal::Bool=false,
+    do_checks::Bool=false,
 )
     n = length(μ)
-    @assert size(Σ) == (n,n) "Σ must be n×n"
-    @assert length(γ) == n   "γ must be length n"
-    @assert 1 ≤ k ≤ n        "k must be between 1 and n"
+    if do_checks
+        @assert n > 0 "μ must be non-empty"
+        @assert size(Σ) == (n,n) "Σ must be n×n"
+        @assert length(γ) == n   "γ must be length n"
+        @assert 1 ≤ k ≤ n        "k must be between 1 and n"
+        @assert ΔT_max > 0       "ΔT_max must be positive"
+        @assert gap > 0          "gap must be positive"
+    end
 
     model = Model(optimizer_with_attributes(
         CPLEX.Optimizer,
@@ -68,7 +91,7 @@ function cutting_planes_selection(
     @constraint(model, sum(z) ≤ k)
     @objective(model, Min, t)
 
-    # 1) Warm‐start OA cut
+    # 1) Warm-start OA cut
     if use_warm_start
         s0  = warm_start(μ, Σ, γ, k; num_random_restarts=num_random_restarts)
         set_start_value.(z, s0)
@@ -76,7 +99,7 @@ function cutting_planes_selection(
         @constraint(model, t ≥ cut.p + dot(cut.grad, z .- s0))
     end
 
-    # 2) SOC‐P bound cut
+    # 2) SOC-P bound cut
     if use_socp_lb
         frac = cplex_misocp_relaxation(n, k; ΔT_max=ΔT_max)
         topk = sortperm(frac, rev=true)[1:k]
@@ -85,12 +108,12 @@ function cutting_planes_selection(
         @constraint(model, t ≥ cut.p + dot(cut.grad, z .- s_lb))
     end
 
-    # 3) Lazy‐OA (and heuristic) callback
+    # 3) Lazy-OA (and heuristic) callback
     function oa_cb(cb_data)
         zf = [callback_value(cb_data, z[i]) for i in 1:n]
         zv = round.(Int, zf)
         if sum(zv) != k
-            return  # only process full‐support candidates
+            return  # only process full-support candidates
         end
 
         # OA cut
@@ -110,7 +133,7 @@ function cutting_planes_selection(
     end
     MOI.set(model, LazyConstraintCallback(), oa_cb)
 
-    # 4) Root Kelley‐primal cuts
+    # 4) Root Kelley-primal cuts
     if use_kelley_primal
         stab0 = zeros(Float64, n)
         for c in kelley_primal_cuts(μ, Σ, γ, k, stab0, 20)

@@ -35,7 +35,7 @@ end
 @testset "compute_mve_sr tests" begin
     # Identity covariance: mve_sr = sqrt(sum(μ.^2))
     μ = [1.0, 2.0, 2.0]
-    Σ = I(3)
+    Σ = Matrix{Float64}(I, 3, 3)
     expected_full = sqrt(sum(μ.^2))
     @test compute_mve_sr(μ, Σ) ≈ expected_full
 

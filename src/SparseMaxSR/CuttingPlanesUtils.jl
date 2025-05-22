@@ -1,4 +1,7 @@
 module CuttingPlanesUtils
+# this module contains useful functions for computing the 
+# mve portfolio selection using the cutting planes approach
+# in Bertsimas & Cory-Wright (2022) 
 
 using JuMP
 using CPLEX

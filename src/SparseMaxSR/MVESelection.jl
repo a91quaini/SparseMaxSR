@@ -5,28 +5,29 @@ module MVESelection
 
 using LinearAlgebra
 using Statistics
-using Distributions
-import Base.Iterators: combinations
 using JuMP
 using CPLEX                              # CPLEX.Optimizer
 import MathOptInterface                  # for status constants and callbacks
 const MOI = MathOptInterface
 
-# bring in the cutting planes utils submodule:
-using ..CuttingPlanesUtils:
-    inner_dual,
-    hillclimb,
-    portfolios_socp,
-    portfolios_objective,
-    warm_start,
-    cplex_misocp_relaxation,
-    kelley_primal_cuts
-
-
 using JuMP: @build_constraint, callback_value
 import MathOptInterface: LazyConstraint, LazyConstraintCallback, submit
+import Combinatorics: combinations
 
-export compute_mve_selection
+# bring in the cutting planes utils submodule:
+using ..CuttingPlanesUtils: inner_dual,
+                            hillclimb,
+                            portfolios_socp,
+                            portfolios_objective,
+                            warm_start,
+                            cplex_misocp_relaxation,
+                            kelley_primal_cuts
+
+using ..SharpeRatio: compute_sr, 
+                     compute_mve_sr, 
+                     compute_mve_weights
+
+export compute_mve_selection, compute_mve_sr_decomposition, simulate_mve_sr
 
 ######################################
 #### compute_mve_selection
@@ -107,7 +108,7 @@ function mve_selection_exhaustive_search(
     selection = Int[]
 
     if max_comb == 0
-        for k in 1:k
+        for _ in 1:k
             for sel_tuple in combinations(1:n, k)
                 sel = collect(sel_tuple)
                 sr = compute_mve_sr(μ, Σ; selection=sel, do_checks=false)
@@ -117,7 +118,7 @@ function mve_selection_exhaustive_search(
             end
         end
     else
-        for k in 1:k
+        for _ in 1:k
             for _ in 1:max_comb
                 sel = randperm(n)[1:k]
                 sr = compute_mve_sr(μ, Σ; selection=sel, do_checks=false)
@@ -155,7 +156,7 @@ problem with ridge regularization.
 - `Σ::Matrix{Float64}`: Covariance matrix (n×n) of asset returns.
 - `k::Int`: Number of assets to select (must satisfy 1 ≤ k ≤ n).
 - `λ::Vector{Float64}` (optional): Ridge regularization parameters (risk aversion coefficients) of length n. If not provided,
-  it defaults to a uniform setting `fill(100.0 / sqrt(n), n)`, which is the standard scaling used in Bertsimas & Cory-Wright (2022).
+  it defaults to a uniform setting `ones(n) .* (100.0/sqrt(n))`, which is the standard scaling used in Bertsimas & Cory-Wright (2022).
 - `ΔT_max::Float64`: Time limit for the solver in seconds.
 - `gap::Float64`: Relative MIP optimality gap tolerance.
 - `num_random_restarts::Int`: Number of random restarts for the warm-start heuristic.
@@ -169,7 +170,7 @@ problem with ridge regularization.
 - `selection::Vector{Int}`: Indices of the k selected assets.
 
 # Ridge Regularization
-- If `λ` is unspecified or empty, it is internally set to `fill(100.0 / sqrt(n), n)` as a default, following the recommended
+- If `λ` is unspecified or empty, it is internally set to `ones(n) .* (100.0/sqrt(n))` as a default, following the recommended
   scaling for balanced penalization.
 """
 function mve_selection_cutting_planes(
@@ -188,7 +189,7 @@ function mve_selection_cutting_planes(
 )
     n = length(μ)
     if isempty(λ)
-        λ = fill(100.0 / sqrt(n), n)
+        λ = ones(n) .* (100.0/sqrt(n))
     end
 
     if do_checks
@@ -263,4 +264,131 @@ function mve_selection_cutting_planes(
     return selection #, status
 end
 
+############################################
+#### compute_mve_sr_decomposition 
+############################################
+
+"""
+    compute_mve_sr_decomposition(
+        μ, Σ, μ_sample, Σ_sample, k; do_checks=false
+    ) -> NamedTuple
+
+Compute the mean-variance efficient Sharpe-ratio decomposition into estimation and selection components.
+
+# Arguments
+- `μ::Vector{Float64}`: Population mean vector (length n).
+- `Σ::Matrix{Float64}`: Population covariance matrix (n×n).
+- `μ_sample::Vector{Float64}`: Sample mean vector (length n).
+- `Σ_sample::Matrix{Float64}`: Sample covariance matrix (n×n).
+- `k::Int`: Maximum cardinality k (1 ≤ k ≤ n) for the selection term.
+- `do_checks::Bool`: If `true`, perform input validity checks.
+
+# Returns
+A `NamedTuple` with fields:
+- `:mve_sr_cardk_est_term` :: `Float64` — estimation component = Sharpe-ratio of sample-MVE weights on population `(μ,Σ)`.
+- `:mve_sr_cardk_sel_term` :: `Float64` — selection component = population MVE Sharpe-ratio on the selected assets.
+"""
+function compute_mve_sr_decomposition(
+    μ::Vector{Float64}, Σ::Matrix{Float64},
+    μ_sample::Vector{Float64}, Σ_sample::Matrix{Float64},
+    k::Int; do_checks::Bool=false
+)
+    n = length(μ)
+    if do_checks
+        @assert length(μ_sample) == n "μ_sample must match length of μ"
+        @assert size(Σ) == (n,n) "Σ must be n×n"
+        @assert size(Σ_sample) == (n,n) "Σ_sample must be n×n"
+        @assert 1 ≤ k ≤ n "k must be between 1 and n"
+        @assert max_comb ≥ 0 "max_comb must be non-negative"
+    end
+
+    # Optional: sample MVE SR (unconstrained)
+    # sample_mve_sr = compute_mve_sr(μ_sample, Σ_sample; do_checks=false)
+
+    # Optional: sample MVE SR with cardinality k
+    # assumes compute_mve_sr_cardk is defined elsewhere:
+    # returns NamedTuple(weight = Vector, selection = Vector{Int}, sr = Float64)
+    # result_cardk = compute_mve_sr_cardk(
+    #     μ_sample, Σ_sample, k; max_comb=max_comb, do_checks=false
+    # )
+
+    # compute optimal sample selection
+    selection = mve_selection(μ_sample, Σ_sample, k)
+
+    # compute the optimal sample weights associated to this selection
+    weights = compute_mve_weights(μ_sample, Σ_sample; selection=selection)
+
+    # population Sharpe ratio decomposition: estimation term
+    est_term = compute_sr(weights, μ, Σ; selection=selection)
+
+    # population Sharpe ratio decomposition: selection term
+    sel_term = compute_mve_sr(μ, Σ; selection=selection)
+
+    return (
+        # sample_mve_sr          = sample_mve_sr,
+        # sample_mve_sr_cardk    = result_cardk.sr,
+        mve_sr_cardk_est_term  = est_term,
+        mve_sr_cardk_sel_term  = sel_term,
+    )
 end
+
+############################
+#### simulate_mve_sr
+############################
+
+"""
+    simulate_mve_sr(
+        μ, Σ, n_obs, k; max_comb=0, do_checks=false
+    ) -> NamedTuple
+
+Simulate samples from a multivariate normal (μ,Σ), compute sample MVE SR decomposition.
+
+# Arguments
+- `μ::Vector{Float64}`: True mean vector.
+- `Σ::Matrix{Float64}`: True covariance matrix.
+- `n_obs::Int`: Number of observations to simulate.
+- `k::Int`: Maximum investment cardinality.
+- `max_comb::Int`: Maximum combinations to enumerate (0 ⇒ all).
+- `do_checks::Bool`: If `true`, perform input checks.
+
+# Returns
+A `NamedTuple` with fields:
+- `:sample_mve_sr` :: `Float64` — optimal sample MVE Sharpe-ratio (unconstrained).
+- `:sample_mve_sr_cardk` :: `Float64` — optimal sample MVE Sharpe-ratio under cardinality `k`.
+- `:mve_sr_cardk_est_term` :: `Float64` — estimation component = Sharpe-ratio of sample-MVE weights on population `(μ,Σ)`.
+- `:mve_sr_cardk_sel_term` :: `Float64` — selection component = population MVE Sharpe-ratio on the selected assets.
+"""
+function simulate_mve_sr(
+    μ::Vector{Float64}, Σ::Matrix{Float64},
+    n_obs::Int, k::Int; max_comb::Int=0, do_checks::Bool=false
+)
+    if do_checks 
+        @assert !isempty(μ) "μ must be non-empty"
+        @assert size(Σ) == (length(μ), length(μ)) "Σ must be square"
+        @assert n_obs > 0 "n_obs must be positive"
+        @assert 1 ≤ k ≤ length(μ) "k must be between 1 and length(μ)"
+        @assert max_comb ≥ 1 "max_comb must be non-negative"
+    end
+
+    # draw standard normals
+    Z = randn(length(μ), n_obs)                    # n × n_obs
+    # turn Σ into a square root via cholesky
+    L = cholesky(Symmetric(Σ)).L           # lower‐triangular
+    # now sample = μ .+ L * Z
+    sample = (L * Z) .+ μ[:, ones(n_obs)]
+    μ_sample     = vec(mean(sample; dims=2))
+    Σ_sample     = cov(eachcol(sample))
+
+    # this needs the Distributions package
+    # mvn = MvNormal(μ, Σ)
+    # sample = rand(mvn, n_obs)          # size: length(μ) × n_obs
+    # mu_sample = vec(mean(sample, dims=2))
+    # sigma_sample = cov(transpose(sample))
+
+    return compute_mve_sr_decomposition(
+        μ, Σ, μ_sample, Σ_sample,
+        k; max_comb=max_comb, do_checks=false
+    )
+end
+
+end # end module

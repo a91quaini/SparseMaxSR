@@ -29,9 +29,9 @@ export inner_dual,
 Solve the dual QP for a fixed support `inds` (|inds| = k) in the k-sparse max-Sharpe problem.
 
 # Arguments
-- `μ::Vector{Float64}` : expected‐return vector (length n)
-- `Σ::Matrix{Float64}` : covariance matrix (n×n)
-- `inds::Vector{Int}` : indices of the k nonzero assets
+- `μ::AbstractVector{Float64}` : expected‐return vector (length n)
+- `Σ::AbstractMatrix{Float64}` : covariance matrix (n×n)
+- `inds::AbstractVector{Int}` : indices of the k nonzero assets
 
 # Returns
 A NamedTuple with fields
@@ -41,9 +41,9 @@ A NamedTuple with fields
 - `w`      : cut‐slack vector w ∈ ℝᵏ
 - `status` : termination status (`MOI.OPTIMAL`, etc.)
 """
-function inner_dual(μ::Vector{Float64},
-                    Σ::Matrix{Float64},
-                    inds::Vector{Int})
+function inner_dual(μ::AbstractVector{Float64},
+                    Σ::AbstractMatrix{Float64},
+                    inds::AbstractVector{Int})
     n = length(μ)
     k = length(inds)
 
@@ -53,7 +53,7 @@ function inner_dual(μ::Vector{Float64},
         "MSK_DPAR_INTPNT_QO_TOL_PFEAS" => 1e-8,
         "MSK_DPAR_INTPNT_QO_TOL_DFEAS" => 1e-8,
         "MSK_IPAR_LOG"               => 0,
-        "MSK_IPAR_MAX_NUM_WARNINGS"  => 0
+        "MSK_IPAR_MAX_NUM_WARNINGS"  => 0,
     ))
 
     # dual variables
@@ -102,20 +102,20 @@ Simple discrete first-order heuristic for the ℓ₀-constrained max-Sharpe prob
 4. Repeat until convergence or `maxiter`.
 
 # Arguments
-- `μ::Vector{Float64}` : expected returns (length n)
-- `Σ::Matrix{Float64}` : covariance matrix (n×n)
+- `μ::AbstractVector{Float64}` : expected returns (length n)
+- `Σ::AbstractMatrix{Float64}` : covariance matrix (n×n)
 - `k::Int`            : desired number of nonzeros
-- `inds0::Vector{Int}`: initial support of size k
+- `inds0::AbstractVector{Int}`: initial support of size k
 - `maxiter::Int`      : maximum number of hill-climb iterations
 
 # Returns
-- `inds::Vector{Int}` : final support (size k)
-- `w_full::Vector{Float64}` : full-length slack vector (wᵢ=0 if i∉inds)
+- `inds::AbstractVector{Int}` : final support (size k)
+- `w_full::AbstractVector{Float64}` : full-length slack vector (wᵢ=0 if i∉inds)
 """
-function hillclimb(μ::Vector{Float64},
-                              Σ::Matrix{Float64},
+function hillclimb(μ::AbstractVector{Float64},
+                              Σ::AbstractMatrix{Float64},
                               k::Int,
-                              inds0::Vector{Int};
+                              inds0::AbstractVector{Int};
                               maxiter::Int = 50)
 
     # n = length(μ)
@@ -166,9 +166,9 @@ Subject to:
   v_i, t ≥ 0
 
 # Arguments
-- `μ::Vector{Float64}` : expected‐return vector, length n  
-- `Σ::Matrix{Float64}` : covariance matrix, n×n  
-- `γ::Vector{Float64}` : per‐asset penalty weights, length n  
+- `μ::AbstractVector{Float64}` : expected‐return vector, length n  
+- `Σ::AbstractMatrix{Float64}` : covariance matrix, n×n  
+- `γ::AbstractVector{Float64}` : per‐asset penalty weights, length n  
 - `k::Int`            : max number of nonzeros (cardinality)
 
 # Returns
@@ -181,9 +181,9 @@ A NamedTuple with fields
 - `t`      : scalar t ≥ 0  
 - `status` : termination status
 """
-function portfolios_socp(μ::Vector{Float64},
-                         Σ::Matrix{Float64},
-                         γ::Vector{Float64},
+function portfolios_socp(μ::AbstractVector{Float64},
+                         Σ::AbstractMatrix{Float64},
+                         γ::AbstractVector{Float64},
                          k::Int)
 
     n = length(μ)
@@ -253,20 +253,20 @@ for the k-sparse max-Sharpe QP:
 5. The gradient is  ∇ₛᵢ = −½·γᵢ·w_full[i]^2.  
 
 # Arguments
-- `μ::Vector{Float64}` : expected returns (length n)
-- `Σ::Matrix{Float64}` : covariance matrix (n×n)
-- `γ::Vector{Float64}` : per-asset cut weights (length n)
+- `μ::AbstractVector{Float64}` : expected returns (length n)
+- `Σ::AbstractMatrix{Float64}` : covariance matrix (n×n)
+- `γ::AbstractVector{Float64}` : per-asset cut weights (length n)
 - `k::Int`            : cardinality bound (must equal `sum(s)`)
-- `s::Vector{Float64}`: 0-1 indicator (length n)
+- `s::AbstractVector{Float64}`: 0-1 indicator (length n)
 
 # Returns
 - An array of NamedTuples `(p, grad, status)` where `status` is the MOI termination symbol.
 """
-function portfolios_objective(μ::Vector{Float64},
-                              Σ::Matrix{Float64},
-                              γ::Vector{Float64},
+function portfolios_objective(μ::AbstractVector{Float64},
+                              Σ::AbstractMatrix{Float64},
+                              γ::AbstractVector{Float64},
                               k::Int,
-                              s::Vector{Float64})
+                              s::AbstractVector{Float64})
 
     n = length(s)
     # @assert length(μ) == n          "μ must be length n"
@@ -300,18 +300,18 @@ Generate a good initial 0–1 portfolio `s` with ∥s∥₀ = k by
 random restarts plus hill‐climbing.
 
 # Arguments
-- `μ::Vector{Float64}` : expected‐return vector
-- `Σ::Matrix{Float64}` : covariance matrix
-- `γ::Vector{Float64}` : per‐asset penalty weights
+- `μ::AbstractVector{Float64}` : expected‐return vector
+- `Σ::AbstractMatrix{Float64}` : covariance matrix
+- `γ::AbstractVector{Float64}` : per‐asset penalty weights
 - `k::Int`            : cardinality bound
 - `num_random_restarts::Int` : how many random seeds to try (default 5)
 
 # Returns
-- `s0::Vector{Float64}` : a binary vector of length `length(μ)` with exactly `k` ones
+- `s0::AbstractVector{Float64}` : a binary vector of length `length(μ)` with exactly `k` ones
 """
-function warm_start(μ::Vector{Float64},
-                        Σ::Matrix{Float64},
-                        γ::Vector{Float64},
+function warm_start(μ::AbstractVector{Float64},
+                        Σ::AbstractMatrix{Float64},
+                        γ::AbstractVector{Float64},
                         k::Int;
                         num_random_restarts::Int = 5)
 
@@ -364,7 +364,7 @@ so that ∑ zᵢ ≈ k at optimality.
 - `ΔT_max::Float64` : time limit (seconds)
 
 # Returns
-- `z::Vector{Float64}` : continuous indicator vector of length n,
+- `z::AbstractVector{Float64}` : continuous indicator vector of length n,
    with ∑ z ≈ k.
 """
 function cplex_misocp_relaxation(n::Int, k::Int; ΔT_max::Float64 = 3600.0)
@@ -373,7 +373,8 @@ function cplex_misocp_relaxation(n::Int, k::Int; ΔT_max::Float64 = 3600.0)
     model = Model(optimizer_with_attributes(
         CPLEX.Optimizer,
         "CPX_PARAM_SCRIND" => 0,       # suppress screen output
-        "CPX_PARAM_TILIM"  => ΔT_max
+        "CPX_PARAM_TILIM"  => ΔT_max,
+        "CPX_PARAM_SCRIND" => 0,
     ))
 
     # z_i ∈ [0,1]
@@ -401,11 +402,11 @@ Generate up to `num_epochs` outer‐approximation cuts at the root node
 via a simple “in–out” stabilization (λ=0.1, δ=2·eps).
 
 # Arguments
-- `μ::Vector{Float64}` : expected returns, length n  
-- `Σ::Matrix{Float64}` : covariance, n×n  
-- `γ::Vector{Float64}` : per‐asset penalty weights, length n  
+- `μ::AbstractVector{Float64}` : expected returns, length n  
+- `Σ::AbstractMatrix{Float64}` : covariance, n×n  
+- `γ::AbstractVector{Float64}` : per‐asset penalty weights, length n  
 - `k::Int`            : cardinality bound  
-- `stab0::Vector{Float64}` : initial stabilization point (∈[0,1]ⁿ)  
+- `stab0::AbstractVector{Float64}` : initial stabilization point (∈[0,1]ⁿ)  
 - `num_epochs::Int`   : how many root passes  
 - `eps::Float64`      : tolerance for stabilization (default 1e-10)
 
@@ -413,11 +414,11 @@ via a simple “in–out” stabilization (λ=0.1, δ=2·eps).
 An array of NamedTuples `(p, grad, status)` (in the same format as
 `portfolios_objective`) representing the cuts generated.
 """
-function kelley_primal_cuts(μ::Vector{Float64},
-                            Σ::Matrix{Float64},
-                            γ::Vector{Float64},
+function kelley_primal_cuts(μ::AbstractVector{Float64},
+                            Σ::AbstractMatrix{Float64},
+                            γ::AbstractVector{Float64},
                             k::Int,
-                            stab0::Vector{Float64},
+                            stab0::AbstractVector{Float64},
                             num_epochs::Int;
                             eps::Float64 = 1e-10)
 

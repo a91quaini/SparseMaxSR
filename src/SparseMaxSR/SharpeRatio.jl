@@ -20,20 +20,20 @@ export compute_sr,
 Compute the Sharpe ratio of a given portfolio.
 
 # Arguments
-- `weights::Vector{Float64}`: Portfolio weights (length n).
-- `μ::Vector{Float64}`: Expected returns vector (length n).
-- `Σ::Matrix{Float64}`: Covariance matrix (n×n).
-- `selection::Vector{Int}` (keyword): Indices of assets to include (default selects all).
+- `weights::AbstractVector{Float64}`: Portfolio weights (length n).
+- `μ::AbstractVector{Float64}`: Expected returns vector (length n).
+- `Σ::AbstractMatrix{Float64}`: Covariance matrix (n×n).
+- `selection::AbstractVector{Int}` (keyword): Indices of assets to include (default selects all).
 - `do_checks::Bool` (keyword): If `true`, perform input argument validations (default = `false`).
 
 # Returns
 - `sr::Float64`: The Sharpe ratio `wᵀ μ / sqrt(wᵀ Σ w)` over the selected assets.
 """
 function compute_sr(
-    weights::Vector{Float64},
-    μ::Vector{Float64},
-    Σ::Matrix{Float64};
-    selection::Vector{Int}=Int[],
+    weights::AbstractVector{Float64},
+    μ::AbstractVector{Float64},
+    Σ::AbstractMatrix{Float64};
+    selection::AbstractVector{Int}=Int[],
     do_checks::Bool=false
 )
     if do_checks
@@ -70,18 +70,18 @@ end
 Compute the maximum Sharpe ratio of the mean-variance efficient portfolio.
 
 # Arguments
-- `μ::Vector{Float64}`: Expected returns vector (length n).
-- `Σ::Matrix{Float64}`: Covariance matrix (n×n).
-- `selection::Vector{Int}` (keyword): Indices of assets to include (default selects all).
+- `μ::AbstractVector{Float64}`: Expected returns vector (length n).
+- `Σ::AbstractMatrix{Float64}`: Covariance matrix (n×n).
+- `selection::AbstractVector{Int}` (keyword): Indices of assets to include (default selects all).
 - `do_checks::Bool` (keyword): If `true`, perform input argument validations (default = `false`).
 
 # Returns
 - `mve_sr::Float64`: The maximal Sharpe ratio `sqrt(μᵀ Σ⁻¹ μ)` over the selected assets.
 """
 function compute_mve_sr(
-    μ::Vector{Float64},
-    Σ::Matrix{Float64};
-    selection::Vector{Int}=Int[],
+    μ::AbstractVector{Float64},
+    Σ::AbstractMatrix{Float64};
+    selection::AbstractVector{Int}=Int[],
     do_checks::Bool=false
 )
     if do_checks
@@ -115,26 +115,26 @@ end
 """
     compute_mve_weights(
         mu, sigma; selection=Int[], gamma=1.0, do_checks=false
-    ) -> Vector{Float64}
+    ) -> AbstractVector{Float64}
 
 Compute Mean-Variance Efficient (MVE) portfolio weights:
 
 w = 1/γ * Σ^{-1} μ
 
 # Arguments
-- `mu::Vector{Float64}`: First moment vector (length n).
-- `sigma::Matrix{Float64}`: Covariance matrix (n×n).
-- `selection::Vector{Int}` (keyword): Indices to include (default all).
+- `mu::AbstractVector{Float64}`: First moment vector (length n).
+- `sigma::AbstractMatrix{Float64}`: Covariance matrix (n×n).
+- `selection::AbstractVector{Int}` (keyword): Indices to include (default all).
 - `gamma::Float64` (keyword): Risk aversion (default 1.0).
 - `do_checks::Bool` (keyword): If `true`, perform input checks (default false).
 
 # Returns
-- `w::Vector{Float64}`: Length-n weight vector with zeros for unselected assets.
+- `w::AbstractVector{Float64}`: Length-n weight vector with zeros for unselected assets.
 """
 function compute_mve_weights(
-    μ::Vector{Float64},
-    Σ::Matrix{Float64};
-    selection::Vector{Int}=Int[],
+    μ::AbstractVector{Float64},
+    Σ::AbstractMatrix{Float64};
+    selection::AbstractVector{Int}=Int[],
     γ::Float64=1.0,
     do_checks::Bool=false
 )

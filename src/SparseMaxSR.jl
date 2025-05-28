@@ -18,16 +18,12 @@ using .SharpeRatio: compute_sr,
 include("SparseMaxSR/MVESelection.jl")
 using .MVESelection: compute_mve_selection,
                      mve_selection_exhaustive_search,
-                     mve_selection_cutting_planes,
-                     compute_mve_sr_decomposition,
-                     simulate_mve_sr
+                     mve_selection_cutting_planes
 
 # export core functions
 export compute_mve_selection, 
        compute_sr, 
        compute_mve_sr,
-       compute_mve_weights,
-       compute_mve_sr_decomposition,
-       simulate_mve_sr
+       compute_mve_weights
 
 end # module

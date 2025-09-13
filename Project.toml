@@ -2,7 +2,7 @@ name = "SparseMaxSR"
 uuid = "67da26f7-3efd-406f-8ecf-6571d1bf31c7"
 license = "MIT"
 authors = ["Alberto Quaini <alberto91quaini@gmail.com>"]
-version = "0.1.0"
+version = "0.2.0"
 
 [deps]
 Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
@@ -19,9 +19,12 @@ Clarabel = "61c947e1-3e6d-4ee4-985a-eec8c727bd6e"
 SCS = "c946c3f1-0d1f-5ce8-9c59-874cb05f43e9"
 
 [extensions]
-SparseMaxSRCOSMOExt    = ["COSMO"]
-SparseMaxSRClarabelExt = ["Clarabel"]
-SparseMaxSRSCExt       = ["SCS"]
+SparseMaxSRClarabelExt     = ["Clarabel"]
+SparseMaxSRCOSMOExt        = ["COSMO"]
+SparseMaxSRSCExt           = ["SCS"]
+SparseMaxSRCPLEXExt        = ["CPLEX"]
+SparseMaxSRMosekToolsExt   = ["MosekTools"]
+
 
 [compat]
 julia = "1.10, 1.11"

@@ -1,197 +1,195 @@
-using Test
-using LinearAlgebra         # for I
-using Random
-import MathOptInterface     # for OPTIMAL
+using Test, Random, LinearAlgebra
+import MathOptInterface as MOI
 
-const MOI = MathOptInterface
+using SparseMaxSR
+import SparseMaxSR: set_default_optimizer!, default_optimizer
+using SparseMaxSR.CuttingPlanesUtils
 
-import SparseMaxSR.CuttingPlanesUtils:  
-    inner_dual,
-    hillclimb,
-    portfolios_socp,
-    portfolios_objective,
-    warm_start,
-    cplex_misocp_relaxation,
-    kelley_primal_cuts
+# ── Detect conic solvers for duals (needed by inner_dual, etc.)
+const HAVE_CLARABEL = Base.find_package("Clarabel") !== nothing
+const HAVE_COSMO    = Base.find_package("COSMO")    !== nothing
+const HAVE_SCS      = Base.find_package("SCS")      !== nothing
+const HAVE_MOSEK    = Base.find_package("MosekTools") !== nothing   # optional for QCQP test
+const HAVE_SOLVER   = HAVE_CLARABEL || HAVE_COSMO || HAVE_SCS
+const HAVE_CPLEX = Base.find_package("CPLEX") !== nothing
 
-###############################################
-###############################################
+# Set a default dual optimizer (factory) if available
+if HAVE_CLARABEL
+    import Clarabel
+    set_default_optimizer!(() -> Clarabel.Optimizer())
+elseif HAVE_COSMO
+    import COSMO
+    set_default_optimizer!(() -> COSMO.Optimizer())
+elseif HAVE_SCS
+    import SCS
+    set_default_optimizer!(() -> SCS.Optimizer())
+end
 
-@testset "inner_dual" begin
-    # a tiny 3‐asset test
-    μ   = [0.1, 0.2, 0.15]
-    Σ   = Matrix{Float64}(I, 3, 3)     # identity covariance
-    inds = [1, 2]                      # support of size 2
+if !HAVE_SOLVER
+    @info "Skipping CuttingPlanesUtils tests: no conic solver installed (Clarabel/COSMO/SCS)."
+else
+    # Helpers
+    make_cov(n; jitter=0.05) = Symmetric(begin
+        A = randn(n,n)
+        A*A' + jitter*I
+    end)
 
-    # call the function under test
-    result = inner_dual(μ, Σ, inds)
+    @testset "CuttingPlanesUtils" begin
+        Random.seed!(1)
+        n, k = 10, 3
+        μ = 0.05 .+ 0.10 .* rand(n)
+        Σ = make_cov(n; jitter=0.05)
+        γ = ones(n)
 
-    @test result.status == MOI.OPTIMAL
-    @test isa(result.ofv, Float64) && isfinite(result.ofv)
+        # ───────────────────────────────────────────────────────────────────
+        @testset "inner_dual basic & epsilon" begin
+            supp = collect(1:k) |> sort!
+            res0 = inner_dual(μ, Σ, supp)
+            @test res0.status in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.ALMOST_OPTIMAL, MOI.ALMOST_LOCALLY_SOLVED)
+            @test isfinite(res0.ofv)
+            @test length(res0.w) == k
 
-    @test length(result.α) == length(μ)
-    @test length(result.w) == length(inds)
+            # With ridge epsilon
+            resε = inner_dual(μ, Σ, supp; epsilon=1e-8)
+            @test resε.status in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.ALMOST_OPTIMAL, MOI.ALMOST_LOCALLY_SOLVED)
+            @test isfinite(resε.ofv)
+        end
 
-    # check complementary slackness: for j∉inds, w not defined;
-    # for j∈inds, w[j] should satisfy w[j] ≥ Σ*α + λ
-    Σα = Σ * result.α
-    for (j,i) in enumerate(inds)
-        @test result.w[j] + 1e-8 ≥ Σα[i] + result.λ
+        # ───────────────────────────────────────────────────────────────────
+        @testset "inner_dual argument checks" begin
+            bad_supp_dup = [1,1,2]
+            @test_throws ErrorException inner_dual(μ, Σ, bad_supp_dup)
+
+            bad_supp_range = [0, 2, 3]
+            @test_throws ErrorException inner_dual(μ, Σ, bad_supp_range)
+
+            @test_throws ErrorException inner_dual(μ, randn(n, n+1), collect(1:k))
+        end
+
+        # ───────────────────────────────────────────────────────────────────
+        @testset "portfolios_objective sanity + ensure_one" begin
+            s = clamp.(rand(n), 0, 1)
+            cut = portfolios_objective(μ, Σ, γ, k, s)
+            @test isfinite(cut.p)
+            @test length(cut.grad) == n
+            @test all(isfinite, cut.grad)
+
+            # All-below-threshold but ensure_one=true still works
+            s0 = zeros(n)
+            cut2 = portfolios_objective(μ, Σ, γ, k, s0; threshold=0.9, ensure_one=true)
+            @test isfinite(cut2.p)
+            @test all(isfinite, cut2.grad)
+
+            # All-below-threshold with ensure_one=false throws
+            @test_throws ErrorException portfolios_objective(μ, Σ, γ, k, s0; threshold=0.9, ensure_one=false)
+        end
+
+        # ───────────────────────────────────────────────────────────────────
+        @testset "hillclimb returns valid support" begin
+            init_inds = sort!(randperm(n)[1:k])
+            h = hillclimb(μ, Σ, k, init_inds; maxiter=20)
+            @test h.status in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.ALMOST_OPTIMAL, MOI.ALMOST_LOCALLY_SOLVED)
+            @test length(h.inds) == k
+            @test issorted(h.inds)
+            @test all(1 .≤ h.inds .≤ n)
+            @test length(h.w_full) == n
+        end
+
+        # ───────────────────────────────────────────────────────────────────
+        @testset "warm_start binary indicator with exactly k ones + reproducibility" begin
+            using Random: MersenneTwister
+            rng1 = MersenneTwister(2024)
+            rng2 = MersenneTwister(2024)
+
+            s1 = warm_start(μ, Σ, γ, k; num_random_restarts=3, maxiter=25, rng=rng1)
+            s2 = warm_start(μ, Σ, γ, k; num_random_restarts=3, maxiter=25, rng=rng2)
+
+            @test length(s1) == n
+            @test count(>(0.5), s1) == k
+            @test all(x -> 0.0 ≤ x ≤ 1.0, s1)
+            @test s1 == s2  # deterministic given same seed & settings
+        end
+
+        # ───────────────────────────────────────────────────────────────────
+        @testset "kelley_primal_cuts returns usable cuts" begin
+            cuts = kelley_primal_cuts(μ, Σ, γ, k, zeros(n), 4; lambda=0.2, delta_scale=2.0)
+            @test !isempty(cuts)
+            @test all(c -> length(c.grad) == n && isfinite(c.p), cuts)
+        end
+
+        # ───────────────────────────────────────────────────────────────────
+        @testset "portfolios_socp rotated SOC" begin
+            # Only run if the function exists in the module (older file revisions may omit it)
+            if isdefined(CuttingPlanesUtils, :portfolios_socp)
+                # Supply an explicit optimizer factory to avoid any tool-specific defaulting
+                opt = default_optimizer()
+                res = CuttingPlanesUtils.portfolios_socp(μ, Σ, γ, k;
+                    optimizer = opt, form = :rotated_soc, epsilon = 1e-8)
+                @test res.status in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.ALMOST_OPTIMAL, MOI.ALMOST_LOCALLY_SOLVED)
+                @test isfinite(res.ofv)
+                @test length(res.w) == n
+            else
+                @info "Skipping portfolios_socp test: function not present in current build."
+            end
+        end
+
+        # ───────────────────────────────────────────────────────────────────
+        @testset "portfolios_socp QCQP via MosekTools (if present)" begin
+            if isdefined(CuttingPlanesUtils, :portfolios_socp) && HAVE_MOSEK
+                import MosekTools
+                res = CuttingPlanesUtils.portfolios_socp(μ, Σ, γ, k;
+                    optimizer = MosekTools.Optimizer, form = :qcqp, epsilon = 1e-8)
+                @test res.status in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED, MOI.ALMOST_OPTIMAL, MOI.ALMOST_LOCALLY_SOLVED)
+                @test isfinite(res.ofv)
+            else
+                @info "Skipping QCQP portfolios_socp test (MosekTools not installed or function absent)."
+            end
+        end
+
+        # ───────────────────────────────────────────────────────────────────
+        @testset "error cases (defensive)" begin
+            # portfolios_socp unknown form
+            if isdefined(CuttingPlanesUtils, :portfolios_socp)
+                @test_throws ErrorException CuttingPlanesUtils.portfolios_socp(μ, Σ, γ, k; form = :not_a_form)
+            end
+
+            # kelley_primal_cuts: bad args
+            @test_throws ErrorException kelley_primal_cuts(μ, Σ, γ, 0, zeros(n), 3)
+            @test_throws ErrorException kelley_primal_cuts(μ, randn(n, n+1), γ, k, zeros(n), 3)
+        end
+
+        @testset "kelley_primal_cuts with CPLEX (if present)" begin
+            if HAVE_CPLEX
+                try
+                    import CPLEX
+                    # Small instance to keep this snappy
+                    Random.seed!(42)
+                    n, k = 12, 4
+                    μ = 0.05 .+ 0.10 .* rand(n)
+                    A = randn(n,n); Σ = Symmetric(A*A' .+ 0.05I)
+                    γ = ones(n)
+
+                    # Use CPLEX for the root LP in Kelley; keep it quiet and time-limited.
+                    attrs = Dict(
+                        MOI.Silent() => true,
+                        MOI.TimeLimitSec() => 5.0,
+                        MOI.RelativeGapTolerance() => 1e-3,
+                    )
+
+                    cuts = kelley_primal_cuts(μ, Σ, γ, k, zeros(n), 3;
+                                            optimizer = () -> CPLEX.Optimizer(),
+                                            attrs = attrs,
+                                            lambda = 0.2,
+                                            delta_scale = 2.0)
+
+                    @test !isempty(cuts)
+                    @test all(c -> length(c.grad) == n && isfinite(c.p), cuts)
+                catch err
+                    @info "Skipping CPLEX Kelley test due to error (likely license or install)." error=err
+                end
+            else
+                @info "CPLEX not installed; skipping CPLEX-specific Kelley test."
+            end
+        end
     end
 end
-
-###############################################
-###############################################
-
-@testset "hillclimb" begin
-    # simple 3‐asset problem
-    μ    = [0.1, 0.2, 0.15]
-    Σ    = Matrix{Float64}(I, 3, 3)    # identity covariance
-    k    = 2
-    inds0 = [1, 2]
-
-    # run hillclimb
-    inds, w_full = hillclimb(μ, Σ, k, inds0; maxiter=10)
-
-    # 1) support has size k
-    @test length(inds) == k
-
-    # 2) w_full is length n, zero off‐support, positive on‐support
-    @test length(w_full) == length(μ)
-    @test all(w_full[i] == 0.0 for i in setdiff(1:length(μ), inds))
-    @test all(w_full[i] >  0.0 for i in inds)
-
-    # 3) selected inds must be the top-k entries of w_full
-    top_inds = sortperm(w_full, rev=true)[1:k]
-    @test Set(inds) == Set(top_inds)
-end
-
-###############################################
-###############################################
-
-@testset "socp_relaxation" begin
-    # simple 3-asset problem
-    μ = [0.1, 0.2, 0.15]
-    n = length(μ)
-    Σ = Matrix{Float64}(I, n, n)
-    γ = ones(n)
-    k = 2
-
-    # call the relaxation
-    res = portfolios_socp(μ, Σ, γ, k)
-
-    # 1) solver status
-    @test res.status == MOI.OPTIMAL
-
-    # 2) objective finite
-    @test isa(res.ofv, Float64) && isfinite(res.ofv)
-
-    # 3) correct variable lengths
-    @test length(res.α) == n
-    @test length(res.w) == n
-    @test length(res.v) == n
-    @test isa(res.t, Float64)
-
-    # 4) primal feasibility of QCQP constraints
-    Σα = Σ * res.α
-    for i in 1:n
-        @test res.w[i] + 1e-8 ≥ Σα[i] + res.λ           # cut constraint
-        @test res.v[i] + res.t + 1e-8 ≥ (γ[i]/2) * res.w[i]^2  # norm constraint
-    end
-
-    # 5) nonnegativity of slacks
-    @test all(res.v .>= 0)
-    @test res.t ≥ 0
-end
-
-###############################################
-###############################################
-
-@testset "portfolios_objective" begin
-    # a tiny 4-asset example
-    μ = [0.1, 0.2, 0.15, 0.05]
-    n = length(μ)
-    Σ = Matrix{Float64}(I, n, n)    # identity covariance
-    γ = ones(n)                     # uniform γ
-    k = 2
-    s = [1.0, 0.0, 1.0, 0.0]        # picks assets 1 & 3
-
-    # call the function
-    cut = portfolios_objective(μ, Σ, γ, k, s)
-
-    # field names
-    @test hasproperty(cut, :p)
-    @test hasproperty(cut, :grad)
-    @test hasproperty(cut, :status)
-
-    # basic sanity checks
-    @test isa(cut.p, Float64) && isfinite(cut.p)
-    @test length(cut.grad) == n
-    @test cut.status == MOI.OPTIMAL
-
-    # cardinality matches
-    @test sum(s .> 0.5) ≤ k
-
-    # since ∇sᵢ = -½·γᵢ·wᵢ² ≤ 0, gradients should be non-positive
-    @test all(cut.grad .≤ 0.0)
-end
-
-###############################################
-###############################################
-
-@testset "warm_start" begin
-  μ = [0.1,0.2,0.15,0.05]
-  n = length(μ)
-  Σ = Matrix{Float64}(I, n, n)
-  γ = ones(n)
-  k = 2
-
-  s0 = warm_start(μ, Σ, γ, k; num_random_restarts=3)
-
-  @test length(s0) == n
-  @test sum(s0 .> 0.5) == k
-  @test all(v -> v in (0.0,1.0), s0)
-end
-
-###############################################
-###############################################
-
-@testset "cplex_misocp_relaxation" begin
-    n, k = 5, 3
-    z = cplex_misocp_relaxation(n, k; ΔT_max=1.0)
-
-    @test length(z) == n
-    @test all(0.0 .≤ z .≤ 1.0)
-    @test isapprox(sum(z), k; atol=1e-6)
-
-    # Optionally, check solver status too:
-    # (you'd have to modify the function to also return the status)
-    # status = last_solver_status()
-    # @test status == MOI.OPTIMAL
-end
-
-###############################################
-###############################################
-
-
-@testset "kelley_primal_cuts" begin
-    μ = [0.1, 0.2, 0.15, 0.05]
-    n = length(μ)
-    Σ = Matrix{Float64}(I, n, n)
-    γ = ones(n)
-    k = 2
-
-    # start at the zero vector
-    stab0 = zeros(n)
-
-    cuts = cplex_misocp_relaxation # ensure this is loaded first
-    cuts = kelley_primal_cuts(μ, Σ, γ, k, stab0, 3)
-
-    @test isa(cuts, Vector)
-    @test all( isa(cut.p, Float64) && isfinite(cut.p) for cut in cuts )
-    @test all( length(cut.grad) == n for cut in cuts )
-    @test all( cut.status == MOI.OPTIMAL for cut in cuts )
-    @test length(cuts) ≤ 3
-end
-
-

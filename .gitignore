@@ -1,22 +1,75 @@
-# —— Julia ———————————————————————————————————————————————
-*.jl.cov                # coverage reports
-.julia/                 # local Julia packages
-logs/                   # REPL logs
+# ── Julia ─────────────────────────────────────────────────────────────────────
+# Coverage & profiling
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+lcov.info
+/coverage/
 
-# Pkg artifacts + build
+# Local Julia package/dev caches (keep out of repos)
+.julia/
+logs/
+
+# Pkg artifacts & builds
+/artifacts/
 /deps/
 /build/
-/Manifest.toml          # if you prefer not committing it
-/.vscode/               # editor settings
-*.egg                   
+# Ignore ONLY the top-level Manifest; it's common to COMMIT docs/Manifest.toml
+/Manifest.toml
 
-# OS files
-.DS_Store
-Thumbs.db
+# If you keep separate envs in examples/tests, uncomment as needed:
+# /examples/Manifest.toml
+# /test/Manifest.toml
 
-# VS Code history
-.history/
-
-# docs build
+# ── Documentation (Documenter.jl) ────────────────────────────────────────────
 /docs/build/
+/docs/site/
+# If you prefer to regenerate docs env each time, uncomment the next line:
+# /docs/Manifest.toml
+# Franklin.jl (if you switch to it later)
+# /docs/__site/
+# /docs/_build/
 
+# ── Editors & IDEs ───────────────────────────────────────────────────────────
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains (CLion, IntelliJ, etc.)
+.idea/
+
+# Vim / Neovim
+*.swp
+*.swo
+*.swn
+.*.sw?
+*~
+
+# Emacs
+*~
+\#*\#
+.#*
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter / Pluto (if you experiment in notebooks)
+.ipynb_checkpoints/
+
+# direnv / local env files
+.direnv/
+.env
+.env.*
+
+# ── OS cruft ─────────────────────────────────────────────────────────────────
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# ── Misc build/test outputs you might create ─────────────────────────────────
+/tmp/
+/scratch/
+/results/
+/data/*.tmp

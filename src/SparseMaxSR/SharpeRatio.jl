@@ -1,61 +1,76 @@
 module SharpeRatio
-# Utilities for Sharpe ratio, MVE Sharpe ratio, and MVE weights.
 
 using LinearAlgebra
 using Statistics
-using ..SparseMaxSR: EPS_RIDGE
+import ..Utils: EPS_RIDGE, _prep_S
 
 export compute_sr,
        compute_mve_sr,
        compute_mve_weights
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Internal helpers
+# Internal helper
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Symmetrize and (optionally) apply a small ridge:
-#    Σ_eff = Sym( (Σ + Σ')/2 + ε·mean(diag(Σ))·I )
-@inline function _sym_with_ridge(Σ::AbstractMatrix{T}, epsilon::Real=0.0) where {T<:Real}
-    Σsym = (Σ + Σ')/T(2)                # regular add/div (no dots needed)
-    if epsilon > 0
-        s = T(epsilon) * T(mean(diag(Σsym)))
-        return Symmetric(Σsym + s*I)    # <-- plain '+' with I works
-    else
-        return Symmetric(Σsym)
+# Solve Σ x = b using the best available symmetric solver:
+# 1) Try Cholesky (SPD).
+# 2) Try LDLᵀ (symmetric indefinite/PSD with pivoting).
+# 3) Fallback: pseudoinverse (last resort).
+@inline function _sym_solve(Σs::Symmetric{T,<:AbstractMatrix{T}}, b::AbstractVector{T}) where {T<:Real}
+    try
+        return cholesky(Σs) \ b
+    catch
+        try
+            return ldlt(Σs) \ b
+        catch
+            return pinv(Matrix(Σs)) * b
+        end
     end
 end
 
-# ──────────────────────────────────────────────────────────────────────────────
-# API
-# ──────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# Public API
+# =============================================================================
 
 """
-    compute_sr(weights, μ, Σ; selection=Int[], epsilon=EPS_RIDGE, do_checks=false) -> Float64
+    compute_sr(weights, μ, Σ;
+               selection=Int[], epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=true) -> Float64
 
-Sharpe ratio of a given portfolio: `SR = (w' μ) / sqrt(w' Σ w)`.
+Compute the Sharpe ratio of a given portfolio:
 
-If `selection` is provided, the SR is computed on that subvector/submatrix,
-i.e. only the selected assets are considered. A small ridge can be added
-via `epsilon` for numerical stability.
+SR = (w' μ) / sqrt(w' Σ w).
 
-Returns `NaN` if the variance term becomes nonpositive or nonfinite.
+# Arguments
+- `weights`: portfolio weights.
+- `μ`: mean vector of asset excess returns.
+- `Σ`: covariance matrix of asset excess returns.
+- `selection`: (optional) subset of indices on which to compute SR.
+- `epsilon`: ridge added during stabilization for numerical safety.
+- `stabilize_Σ`: whether to symmetrize and ridge-stabilize Σ.
+- `do_checks`: validate dimensions and finiteness.
+
+Returns `NaN` if the variance term is nonpositive or nonfinite.
 """
 function compute_sr(
     weights::AbstractVector{<:Real},
     μ::AbstractVector{<:Real},
     Σ::AbstractMatrix{<:Real};
     selection::AbstractVector{<:Integer}=Int[],
-    epsilon::Real=EPS_RIDGE[],
-    do_checks::Bool=false
+    epsilon::Real=EPS_RIDGE,
+    stabilize_Σ::Bool=true,
+    do_checks::Bool=true
 )::Float64
     n = length(μ)
-    do_checks && begin
+
+    if do_checks
         length(weights) == n || error("weights and μ must have the same length.")
-        size(Σ) == (n, n)      || error("Σ must be $n×$n.")
+        size(Σ) == (n, n) || error("Σ must be $n×$n.")
         isempty(selection) || all(1 .≤ selection .≤ n) || error("selection out of bounds 1..$n.")
+        all(isfinite, weights) && all(isfinite, μ) && all(isfinite, Σ) || error("Non-finite inputs.")
+        isfinite(epsilon) || error("epsilon must be finite.")
     end
 
-    Σeff = _sym_with_ridge(Σ, epsilon)
+    Σeff = _prep_S(Σ, epsilon, stabilize_Σ)
 
     if isempty(selection) || length(selection) == n
         num = dot(weights, μ)
@@ -64,39 +79,53 @@ function compute_sr(
         sel = selection
         w   = weights[sel]
         μs  = μ[sel]
-        Σs  = Symmetric(Matrix(Σeff)[sel, sel])  # dense submatrix with symmetry hint
+        Σs  = Symmetric(Σeff[sel, sel])
         num = dot(w, μs)
         v   = dot(w, Σs * w)
     end
 
-    den = sqrt(v)
-    return (isfinite(den) && den > 0) ? float(num / den) : NaN
+    v = float(v)
+    if !isfinite(v) || v <= 0
+        return NaN
+    end
+    return num / sqrt(v)
 end
 
 
 """
-    compute_mve_sr(μ, Σ; selection=Int[], epsilon=EPS_RIDGE, do_checks=false) -> Float64
+    compute_mve_sr(μ, Σ;
+                   selection=Int[], epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=true) -> Float64
 
-Maximum Sharpe ratio (MVE) over the selected assets:
-`MVE_SR = sqrt( μ' Σ^{-1} μ )`.
+Compute the **maximum Sharpe ratio** achievable over a subset of assets:
 
-Uses a Cholesky solve when `Σ` is SPD; otherwise falls back to a pseudoinverse.
-A small ridge (scaled by `mean(diag(Σ))`) can be added via `epsilon`.
+MVE_{SR} = sqrt(μ' Σ^{-1} μ).
+
+# Details
+Uses numerically stable symmetric linear solves:
+- Cholesky for SPD matrices;
+- LDLᵀ (pivoted) for PSD/indefinite cases;
+- pseudoinverse fallback if both fail.
+
+`stabilize_Σ=true` ensures Σ is symmetrized and ridge-stabilized to aid convergence.
 """
 function compute_mve_sr(
     μ::AbstractVector{<:Real},
     Σ::AbstractMatrix{<:Real};
     selection::AbstractVector{<:Integer}=Int[],
-    epsilon::Real=EPS_RIDGE[],
-    do_checks::Bool=false
+    epsilon::Real=EPS_RIDGE,
+    stabilize_Σ::Bool=true,
+    do_checks::Bool=true
 )::Float64
     n = length(μ)
-    do_checks && begin
+
+    if do_checks
         size(Σ) == (n, n) || error("Σ must be $n×$n.")
         isempty(selection) || all(1 .≤ selection .≤ n) || error("selection out of bounds 1..$n.")
+        all(isfinite, μ) && all(isfinite, Σ) || error("Non-finite inputs.")
+        isfinite(epsilon) || error("epsilon must be finite.")
     end
 
-    Σeff = _sym_with_ridge(Σ, epsilon)
+    Σeff = _prep_S(Σ, epsilon, stabilize_Σ)
 
     if isempty(selection) || length(selection) == n
         μs = μ
@@ -104,72 +133,68 @@ function compute_mve_sr(
     else
         sel = selection
         μs = μ[sel]
-        Σs = Symmetric(Matrix(Σeff)[sel, sel])
+        Σs = Symmetric(Σeff[sel, sel])
     end
 
-    val = try
-        # SPD path
-        x = cholesky(Σs) \ μs
-        dot(μs, x)
-    catch
-        # fallback: pseudoinverse (handles semidefinite/ill-conditioned)
-        P = pinv(Matrix(Σs))
-        dot(μs, P * μs)
-    end
-
+    x   = _sym_solve(Σs, μs)
+    val = dot(μs, x)
     return sqrt(max(float(val), 0.0))
 end
 
 
 """
-    compute_mve_weights(μ, Σ; selection=Int[], γ=1.0, epsilon=EPS_RIDGE, do_checks=false)
-    -> Vector{Float64}
+    compute_mve_weights(μ, Σ;
+                        selection=Int[],
+                        epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=true) -> Vector{Float64}
 
-Mean-Variance Efficient (unconstrained) weights:
-`w = (1/γ) · Σ^{-1} μ`.
+Compute **mean–variance efficient (MVE) portfolio weights**:
 
-Returns a length-`n` vector. If `selection` is provided, entries off-selection
-are set to zero. No budget or sign constraints are imposed, and the vector is
-**not** normalized to sum to one (do that downstream if desired).
+
+w^* = Σ^{-1} μ.
+
+# Arguments
+- `μ`: mean vector of excess returns.
+- `Σ`: covariance matrix.
+- `selection`: (optional) subset of indices; others are set to zero.
+- `epsilon`: ridge stabilization parameter.
+- `stabilize_Σ`: symmetrize and ridge-stabilize Σ before inversion.
+- `do_checks`: input validation.
+
+# Returns
+A vector of MVE weights.
 """
 function compute_mve_weights(
     μ::AbstractVector{<:Real},
     Σ::AbstractMatrix{<:Real};
     selection::AbstractVector{<:Integer}=Int[],
-    γ::Real=1.0,
-    epsilon::Real=EPS_RIDGE[],
-    do_checks::Bool=false
+    epsilon::Real=EPS_RIDGE,
+    stabilize_Σ::Bool=true,
+    do_checks::Bool=true
 )::Vector{Float64}
     n = length(μ)
-    do_checks && begin
+
+    if do_checks
         n > 0 || error("μ must be non-empty.")
         size(Σ) == (n, n) || error("Σ must be $n×$n.")
-        γ > 0 || error("γ must be positive.")
         isempty(selection) || all(1 .≤ selection .≤ n) || error("selection out of bounds 1..$n.")
+        all(isfinite, μ) && all(isfinite, Σ) || error("Non-finite inputs.")
+        isfinite(epsilon) || error("epsilon must be finite.")
     end
 
-    Σeff = _sym_with_ridge(Σ, epsilon)
+    Σeff = _prep_S(Σ, epsilon, stabilize_Σ)
 
     if isempty(selection) || length(selection) == n
-        w = try
-            cholesky(Σeff) \ μ
-        catch
-            pinv(Matrix(Σeff)) * μ
-        end
-        return Vector{Float64}(w ./ γ)
+        w = _sym_solve(Σeff, μ)
     else
         sel = selection
         μs  = μ[sel]
-        Σs  = Symmetric(Matrix(Σeff)[sel, sel])
-        ws  = try
-            cholesky(Σs) \ μs
-        catch
-            pinv(Matrix(Σs)) * μs
-        end
-        w = zeros(Float64, n)
-        @inbounds w[sel] .= ws ./ γ
-        return w
+        Σs  = Symmetric(Σeff[sel, sel])
+        ws  = _sym_solve(Σs, μs)
+        w   = zeros(Float64, n)
+        @inbounds w[sel] .= ws
     end
+
+    return w
 end
 
 end # module

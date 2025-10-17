@@ -1,72 +1,47 @@
 # SparseMaxSR.jl
 
-Sparse maximum–Sharpe portfolio selection in Julia.  
-This package provides utilities to:
+SparseMaxSR.jl provides fast, reproducible utilities for **sparse maximum–Sharpe** portfolio selection in Julia. It includes:
 
-- Compute **Sharpe ratios** and **mean–variance efficient (MVE) weights**.
-- Select a **k‑sparse** maximum–Sharpe portfolio via either:
-  - **Exhaustive search** (exact for small instances), or
-  - A scalable **cutting‑planes** algorithm inspired by Bertsimas & Cory‑Wright (2022).
-
-It is solver‑agnostic: plug in open‑source solvers (HiGHS, GLPK, Clarabel, COSMO, SCS)
-or commercial solvers (CPLEX, Mosek, Gurobi). All solvers are **optional** — the
-package will work with the ones you’ve installed.
-
----
-
-## Features
-
-- **SharpeRatio**
-  - `compute_sr(w, μ, Σ)` — Sharpe ratio of a given weight vector.
-  - `compute_mve_sr(μ, Σ)` — maximum Sharpe ratio on a support.
-  - `compute_mve_weights(μ, Σ)` — unconstrained MVE weights (`Σ⁻¹ μ`).
-
-- **MVESelection**
-  - `compute_mve_selection(μ, Σ, k; method=:auto)` — pick `k` assets to maximize SR.  
-    - `:exhaustive` (exact) for small problems.  
-    - `:cutting_planes` (outer‑approximation) for larger problems.
-
-- **CuttingPlanesUtils** (advanced)
-  - Building blocks: dual QP/SOC relaxations, Kelley cuts, warm starts, local search.
-
-**Robust defaults**
-
-- A tiny ridge `ε·mean(diag(Σ))·I` is applied by default with `ε = EPS_RIDGE[]` (defaults to `1e-6`).
-- A **default conic optimizer** is selected at runtime (Clarabel → COSMO → SCS), unless you set it explicitly.
+- **Sharpe & MVE utilities**
+  - `compute_sr(w, μ, Σ)` — Sharpe ratio of given weights.
+  - `compute_mve_sr(μ, Σ; selection=:)` — Maximum Sharpe on a support.
+  - `compute_mve_weights(μ, Σ; selection=:)` — Mean–variance efficient (MVE) weights.
+- **k‑sparse selection**
+  - `compute_mve_selection(μ, Σ, k; method=:exhaustive or :cutting_planes)` — choose `k` assets to maximize Sharpe.  
+    Cutting‑planes scales to larger problems; exhaustive is exact for small ones.
+- **Solver‑friendly design**
+  - Works with free solvers (SCS, Clarabel, COSMO, HiGHS, GLPK) and commercial ones (CPLEX, Mosek, Gurobi).
+  - A **default conic/QP solver** is auto‑detected and can be **persisted** across sessions via `Preferences.jl`.
 
 ---
 
 ## Installation
 
+Add the package (replace URL if you host under a different org/user):
+
 ```julia
-pkg> add https://github.com/<your-org-or-user>/SparseMaxSR.jl
+pkg> add https://github.com/<your-user-or-org>/SparseMaxSR.jl
 ```
 
-> If you’re developing locally:
->
-> ```julia
-> pkg> dev /path/to/SparseMaxSR
-> pkg> activate /path/to/SparseMaxSR
-> pkg> instantiate
-> pkg> test
-> ```
+If developing locally:
+
+```julia
+pkg> dev /path/to/SparseMaxSR
+pkg> activate /path/to/SparseMaxSR
+pkg> instantiate
+pkg> test
+```
 
 ### Optional solvers
 
-- **MILP master (cutting‑planes)**: `HiGHS.jl` (open‑source), `GLPK.jl`, `Gurobi.jl`, `CPLEX.jl`.
-- **Conic/QP duals**: `Clarabel.jl` (open‑source), `COSMO.jl`, `SCS.jl`, `MosekTools.jl`.
+Install any of the following as needed:
 
-Install any you want, e.g.:
 ```julia
-pkg> add HiGHS Clarabel
-# or
-pkg> add GLPK COSMO
-# or
-pkg> add CPLEX MosekTools
+pkg> add SCS Clarabel COSMO HiGHS GLPK
+# (commercial) pkg> add CPLEX MosekTools Gurobi
 ```
 
-> **Licenses**: CPLEX/Gurobi/Mosek require separate installation and licenses. Verify
-> the solver works in your Julia environment before using it with JuMP.
+> Commercial solvers require external installation/licensing.
 
 ---
 
@@ -76,202 +51,121 @@ pkg> add CPLEX MosekTools
 using SparseMaxSR
 using Random, LinearAlgebra
 
-# small synthetic instance
+# synthetic instance
 Random.seed!(1)
-n, k = 10, 3
-μ = 0.05 .+ 0.10 .* rand(n)
-A = randn(n,n); Σ = Symmetric(A*A' .+ 0.05I)  # SPD-ish
+n, k = 12, 4
+μ = 0.03 .+ 0.12 .* rand(n)
 
-# Compute MVE weights and SR
-w  = SparseMaxSR.compute_mve_weights(μ, Σ)      # unconstrained Σ⁻¹μ (not normalized)
-sr = SparseMaxSR.compute_sr(w, μ, Σ)
+A = randn(n,n)
+Σ = Symmetric(A*A' .+ 0.05I)  # SPD-ish
 
-# Select k assets (automatic method switching)
-sel = SparseMaxSR.compute_mve_selection(μ, Σ, k)   # returns sorted indices of length k
+# Unconstrained MVE weights and Sharpe
+w  = compute_mve_weights(μ, Σ)      # returns Vector{Float64}
+sr = compute_sr(w, μ, Σ)
+
+# k-sparse selection (auto-chooses a method & conic solver)
+sel = compute_mve_selection(μ, Σ, k)  # Vector{Int} of length k
+
+# Maximum Sharpe restricted to the selected support
+sr_k = compute_mve_sr(μ, Σ; selection=sel)
+```
+
+**Tip:** If Σ is ill‑conditioned/noisy, increase the global ridge:
+
+```julia
+import SparseMaxSR: set_default_ridge!
+set_default_ridge!(1e-4)
 ```
 
 ---
 
-## Choosing solvers
+## Choosing and persisting solvers
 
-SparseMaxSR separates two solver roles:
+SparseMaxSR separates **two** solver roles in the cutting‑planes method:
 
-1. **Conic/QP dual solver** — used inside the cutting‑planes routine for evaluating
-   dual subproblems and relaxations. You control this **globally** with:
-   ```julia
-   import SparseMaxSR: set_default_optimizer!
-   import Clarabel
-   set_default_optimizer!(() -> Clarabel.Optimizer())
-   ```
-   or **per call** via `dual_optimizer = () -> Clarabel.Optimizer()`.
+1. **Conic/QP dual solver** (used for dual relaxations): SCS / Clarabel / COSMO / Mosek
+2. **MILP master solver** (for the master problem): HiGHS / GLPK / CPLEX / Gurobi / Mosek
 
-2. **MILP master solver** — used when `method = :cutting_planes` to solve the master
-   MILP in `(z, t)`. Pass it **per call** with the `optimizer` keyword, e.g.:
-   ```julia
-   import HiGHS
-   sel = SparseMaxSR.compute_mve_selection(μ, Σ, k;
-       method   = :cutting_planes,
-       optimizer = () -> HiGHS.Optimizer())    # MILP master
-   ```
+You can:
 
-### Enforcing a particular solver when multiple are present
+### A) Persist your preferred conic/QP solver across sessions
 
-- **Force a specific conic/QP solver** (for duals):
-  ```julia
-  import SparseMaxSR: set_default_optimizer!
-  import COSMO
-  set_default_optimizer!(() -> COSMO.Optimizer())
-  # or per-call
-  sel = SparseMaxSR.compute_mve_selection(μ, Σ, k;
-      method = :cutting_planes,
-      dual_optimizer = () -> COSMO.Optimizer())
-  ```
-
-- **Force a specific MILP master**:
-  ```julia
-  import CPLEX
-  sel = SparseMaxSR.compute_mve_selection(μ, Σ, k;
-      method    = :cutting_planes,
-      optimizer = () -> CPLEX.Optimizer())
-  ```
-
-- **Mix and match**:
-  ```julia
-  import HiGHS, Clarabel
-  sel = SparseMaxSR.compute_mve_selection(μ, Σ, k;
-      method        = :cutting_planes,
-      optimizer     = () -> HiGHS.Optimizer(),        # MILP master
-      dual_optimizer= () -> Clarabel.Optimizer())     # conic/QP duals
-  ```
-
-> If you don’t set anything, SparseMaxSR tries Clarabel → COSMO → SCS for duals.
-> There is **no default** MILP master – pass one when you choose `method=:cutting_planes`.
-
----
-
-## API Reference (selected)
-
-### `compute_sr(weights, μ, Σ; selection=Int[], epsilon=EPS_RIDGE[], do_checks=false) -> Float64`
-
-Sharpe ratio `SR = (w'μ) / √(w'Σw)`.  
-If `selection` is given, SR is computed on that subvector/submatrix.
-A small ridge is applied to Σ if `epsilon > 0` (defaults to `EPS_RIDGE[]`).
-
-**Example**
 ```julia
-w = ones(n) ./ n
-sr = SparseMaxSR.compute_sr(w, μ, Σ)
+# Once per environment (saved via Preferences.jl)
+using SparseMaxSR
+save_default_solver!("Clarabel")   # or "SCS", "COSMO", "auto"
 ```
 
-### `compute_mve_sr(μ, Σ; selection=Int[], epsilon=EPS_RIDGE[], do_checks=false) -> Float64`
+### B) Override the conic/QP solver for the current session only
 
-Maximum Sharpe ratio on a support using `Σ⁻¹ μ` (Cholesky when SPD; pseudoinverse otherwise).
-
-**Example**
 ```julia
-sr_all = SparseMaxSR.compute_mve_sr(μ, Σ)
-sr_on_sel = SparseMaxSR.compute_mve_sr(μ, Σ; selection = sel)
+using SparseMaxSR, Clarabel
+set_default_optimizer!(() -> Clarabel.Optimizer())
 ```
 
-### `compute_mve_weights(μ, Σ; selection=Int[], γ=1.0, epsilon=EPS_RIDGE[], do_checks=false) -> Vector{Float64}`
+### C) Specify explicit solvers per call (recommended for cutting‑planes)
 
-Unconstrained MVE weights `w = (1/γ) Σ⁻¹ μ`. Returned as a length‑`n` vector, with zeros off‑selection.
-
-**Example**
 ```julia
-w = SparseMaxSR.compute_mve_weights(μ, Σ; γ = 2.0)
-```
-
-### `compute_mve_selection(μ, Σ, k; method=:auto, exhaustive_threshold=20, exhaustive_max_combs=200_000, optimizer=nothing, attrs=NamedTuple(), dual_optimizer=nothing, dual_attrs=NamedTuple(), epsilon=EPS_RIDGE[], rng=Random.default_rng()) -> Vector{Int}`
-
-Select `k` assets that (approximately) maximize SR.
-
-- `:exhaustive` — exact for small instances.  
-- `:cutting_planes` — outer‑approximation (MILP master + dual QP/SOC cuts).
-
-**Example (automatic):**
-```julia
-sel = SparseMaxSR.compute_mve_selection(μ, Σ, 5)
-```
-
-**Example (cutting‑planes with explicit solvers):**
-```julia
-import HiGHS, Clarabel
-sel = SparseMaxSR.compute_mve_selection(μ, Σ, 10;
+using HiGHS, Clarabel
+sel = compute_mve_selection(μ, Σ, 10;
     method         = :cutting_planes,
-    optimizer      = () -> HiGHS.Optimizer(),        # MILP
-    dual_optimizer = () -> Clarabel.Optimizer()      # duals
+    optimizer      = () -> HiGHS.Optimizer(),      # MILP master
+    dual_optimizer = () -> Clarabel.Optimizer()    # conic/QP duals
 )
 ```
 
+> If you don’t set anything, the conic/QP dual solver is **auto‑detected**
+> in this order: **SCS → Clarabel → COSMO**. You must pass a MILP master
+> when using `method=:cutting_planes`.
+
 ---
 
-## Tuning & Tips
+## API Sketch
 
-- **Ridge**: increase `EPS_RIDGE[]` if Σ is nearly singular/noisy:
-  ```julia
-  import SparseMaxSR: set_default_ridge!, EPS_RIDGE
-  set_default_ridge!(1e-4)    # used by default in all Sharpe/MVE utilities
-  ```
+### `compute_sr(w, μ, Σ; selection=Int[], epsilon=EPS_RIDGE[], do_checks=false) -> Float64`
+Sharpe ratio `SR = (w'μ) / sqrt(w'Σw)`. If `selection` is provided, the SR is computed on that subvector/submatrix. A ridge `epsilon` (default `EPS_RIDGE[]`) can stabilize Σ.
 
-- **Exhaustive vs Cutting‑planes**:
-  - Exhaustive is exact but exponential in `k`.
-  - Cutting‑planes scales much better; pass fast solvers (HiGHS + Clarabel/COSMO/SCS/Mosek).
+### `compute_mve_weights(μ, Σ; selection=Int[], γ=1.0, epsilon=EPS_RIDGE[], do_checks=false) -> Vector{Float64}`
+Unconstrained MVE weights `w = (1/γ) Σ⁻¹ μ`. Zeros off‑selection. Uses Cholesky/pinv as appropriate.
 
-- **Reproducibility**: pass an `rng` to selection and warm‑starts.
+### `compute_mve_sr(μ, Σ; selection=Int[], epsilon=EPS_RIDGE[], do_checks=false) -> Float64`
+Maximum Sharpe on a support computed via MVE weights.
 
-- **MILP attributes**: tune time limits and MIP gap via `attrs`, e.g.:
-  ```julia
-  attrs = (; "time_limit" => 120.0)  # or solver‑specific keys
-  sel = SparseMaxSR.compute_mve_selection(μ, Σ, k;
-      method=:cutting_planes, optimizer=() -> HiGHS.Optimizer(), attrs=attrs)
-  ```
+### `compute_mve_selection(μ, Σ, k; method=:auto, exhaustive_threshold=20, exhaustive_max_combs=200_000, optimizer=nothing, attrs=NamedTuple(), dual_optimizer=nothing, dual_attrs=NamedTuple(), epsilon=EPS_RIDGE[], rng=Random.default_rng()) -> Vector{Int}`
+Choose `k` assets to (approximately) maximize Sharpe.  
+- `:exhaustive` is exact for small problems.  
+- `:cutting_planes` scales to larger `n` and `k`.  
+- Pass `optimizer` for the **MILP** master; `dual_optimizer` for the **conic/QP** subproblems.  
+- Use `attrs`/`dual_attrs` to pass solver parameters (via `MOI.RawParameter`).
+
+---
+
+## Configuration & tips
+
+- **Ridge:** Set once globally with `set_default_ridge!(ε)`; or override per call via `epsilon=...`.
+- **Reproducibility:** Many routines accept `rng` — pass your own `MersenneTwister` to fix randomness.
+- **Time limits / gaps (MILP):** Use `attrs = (; "time_limit" => 120.0, "mip_gap" => 0.01)` (keys are solver‑specific).
 
 ---
 
 ## Testing
 
 From the package root:
+
 ```julia
 pkg> test
 ```
 
-The test suite automatically **skips** solver‑specific parts if the solver is not installed.  
-Install any of HiGHS/GLPK/Clarabel/COSMO/SCS/CPLEX/MosekTools to enable more coverage.
+The suite skips solver‑specific tests when a solver is not installed. Install HiGHS/GLPK/Clarabel/COSMO/SCS/CPLEX/MosekTools to enable more coverage.
 
 ---
 
-## Troubleshooting
+## Citing
 
-- **`No default optimizer set`**  
-  Call `set_default_optimizer!(...)` (e.g., Clarabel) or add Clarabel/COSMO/SCS to your environment.
-
-- **`Package SparseMaxSR does not have CPLEX/MosekTools in its dependencies`**  
-  Commercial solvers are **optional**. Add them to your project when you want to use them.
-
-- **Numeric issues (NaNs, tiny negative variances)**  
-  Increase ridge: `set_default_ridge!(1e-4)` or pass `epsilon=` to the specific function.
-
-- **Slow MILP**  
-  Try HiGHS (open source), tighten time limits/gaps, reduce `k`, or use better warm starts.
-
----
-
-## References
-
-- Bertsimas, D., & Cory‑Wright, R. (2022). *A scalable algorithm for sparse portfolio selection.*  
-  (Kelley cutting‑planes / in–out ideas inform our cutting‑planes routine.)
-
-- Markowitz, H. (1952). *Portfolio selection.* *Journal of Finance.*
+If this package is useful in academic work, please cite Markowitz (1952) and algorithmic references on cutting‑planes for sparse portfolio selection (e.g., Kelley cutting‑planes / in‑out methods).
 
 ---
 
 ## License
 
 MIT © 2025 SparseMaxSR contributors
-
----
-
-## Contributing
-
-Issues and pull requests are welcome. Please include a small reproducer and your solver versions.

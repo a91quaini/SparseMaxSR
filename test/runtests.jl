@@ -3,6 +3,7 @@ using SparseMaxSR
 
 @testset "SparseMaxSR" begin
     include("test-SharpeRatio.jl")
-    include("test-CuttingPlanesUtils.jl")
-    include("test-MVESelection.jl")
+    include("test-ExhaustiveSearch.jl")
+    include("test-MIQPHeuristicSearch.jl")
+    include("test-LassoRelaxationSearch.jl")
 end

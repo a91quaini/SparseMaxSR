@@ -1,8 +1,10 @@
+# test-SharpeRatio.jl
+
 using Test, LinearAlgebra, Random
 using SparseMaxSR
-using SparseMaxSR.SharpeRatio
+using SparseMaxSR.SharpeRatio  # convenient names; functions are also re-exported at top level
 
-const TOL = 1e-7  # slightly relaxed vs 1e-8 to avoid spurious failures
+const TOL = 1e-7  # slightly relaxed to avoid spurious failures across BLAS/solver variants
 
 @testset "SharpeRatio" begin
     # --- basic sanity ---------------------------------------------------------
@@ -27,7 +29,7 @@ const TOL = 1e-7  # slightly relaxed vs 1e-8 to avoid spurious failures
         sel = [1, 3, 4]
         n = length(μ)
 
-        # compute_sr with selection vs explicit submatrix call
+        # compute_sr with selection vs explicit sub-matrix call
         w = rand(n); w ./= sum(abs, w) + eps()
         sr_sel = compute_sr(w, μ, Σ; selection=sel, do_checks=true)
 
@@ -39,6 +41,11 @@ const TOL = 1e-7  # slightly relaxed vs 1e-8 to avoid spurious failures
         w_sel = compute_mve_weights(μ, Σ; selection=sel)
         @test count(!iszero, w_sel) == length(sel)
         @test all(i -> (i ∈ sel) || (w_sel[i] == 0.0), eachindex(w_sel))
+
+        # selection = 1:n should equal "no selection"
+        sr_all   = compute_mve_sr(μ, Σ)
+        sr_fullS = compute_mve_sr(μ, Σ; selection=collect(1:n))
+        @test abs(sr_all - sr_fullS) ≤ TOL
     end
 
     # --- scale behavior -------------------------------------------------------
@@ -104,18 +111,18 @@ const TOL = 1e-7  # slightly relaxed vs 1e-8 to avoid spurious failures
 
     # --- single-asset edge case ----------------------------------------------
     @testset "single-asset" begin
-    μ  = [0.2]
-    σ2 = 0.04
-    Σ  = [σ2;;]            # 1×1 matrix
-    w  = [1.0]
+        μ  = [0.2]
+        σ2 = 0.04
+        Σ  = [σ2;;]            # 1×1 matrix
+        w  = [1.0]
 
-    # Use epsilon=0.0 to match the exact closed-form (no ridge)
-    @test abs(compute_sr(w, μ, Σ; epsilon=0.0) - (μ[1] / sqrt(σ2))) ≤ 1e-12
-    @test abs(compute_mve_sr(μ, Σ; epsilon=0.0) - (abs(μ[1]) / sqrt(σ2))) ≤ 1e-12
-    @test isapprox(abs.(compute_mve_weights(μ, Σ; γ=2.0, epsilon=0.0)),
-                   [μ[1] / (2σ2)];
-                   rtol=0, atol=1e-12)
-end
+        # Use epsilon=0.0 to match the exact closed-form (no ridge)
+        @test abs(compute_sr(w, μ, Σ; epsilon=0.0) - (μ[1] / sqrt(σ2))) ≤ 1e-12
+        @test abs(compute_mve_sr(μ, Σ; epsilon=0.0) - (abs(μ[1]) / sqrt(σ2))) ≤ 1e-12
+        @test isapprox(abs.(compute_mve_weights(μ, Σ; epsilon=0.0)),
+                       [μ[1] / (σ2)];
+                       rtol=0, atol=1e-12)
+    end
 
     # --- weights consistency: SR(w*) == MVE_SR --------------------------------
     @testset "weights consistency" begin
@@ -124,10 +131,26 @@ end
         μ = 0.02 .+ 0.05 .* rand(n)
         A = randn(n, n)
         Σ = Symmetric(A*A' + 0.2I)  # NOTE: plain + with I
-        wstar = compute_mve_weights(μ, Σ; γ=1.0)
+        wstar = compute_mve_weights(μ, Σ)
         sr_wstar = compute_sr(wstar, μ, Σ)
         mve = compute_mve_sr(μ, Σ)
         @test abs(sr_wstar - mve) ≤ 1e-7
+    end
+
+    # --- stabilize_Σ semantics ------------------------------------------------
+    @testset "stabilize_Σ semantics" begin
+        # For a nearly-symmetric Σ, symmetrization should not change results materially.
+        Random.seed!(3)
+        n = 5
+        A = randn(n, n)
+        Σ_raw = A*A' + 0.05I
+        Σ_pert = Σ_raw + 1e-10 * randn(n, n)  # tiny asymmetry
+        μ = rand(n)
+
+        s1 = compute_mve_sr(μ, Σ_pert; stabilize_Σ=true,  epsilon=0.0)
+        s2 = compute_mve_sr(μ, Σ_pert; stabilize_Σ=false, epsilon=0.0)
+        @test isfinite(s1) && isfinite(s2)
+        @test abs(s1 - s2) ≤ 1e-8
     end
 
     # --- error paths when do_checks=true --------------------------------------

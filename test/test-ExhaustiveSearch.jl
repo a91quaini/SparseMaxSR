@@ -50,12 +50,12 @@ end
                                     stabilize_Σ=true, compute_weights=true, do_checks=true)
 
         @test res.status == :EXHAUSTIVE
-        @test length(res.mve_selection) == k
-        @test isapprox(res.mve_sr, brute_sr; atol=1e-10, rtol=0)
-        @test res.mve_selection == brute_set  # combinations() order is deterministic
+        @test length(res.selection) == k
+        @test isapprox(res.sr, brute_sr; atol=1e-10, rtol=0)
+        @test res.selection == brute_set  # combinations() order is deterministic
         # weights consistency
-        @test count(!iszero, res.mve_weights) == k
-        @test abs(_sr_exact(res.mve_weights, μ, Σ; epsilon=0.0) - res.mve_sr) ≤ 1e-7
+        @test count(!iszero, res.weights) == k
+        @test abs(_sr_exact(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-7
     end
 
     @testset "exactly_k=false returns best over sizes 1..k" begin
@@ -77,10 +77,10 @@ end
         res = mve_exhaustive_search(μ, Σ, k; exactly_k=false, max_samples_per_k=0,
                                     epsilon=0.0, stabilize_Σ=true, compute_weights=true)
         @test res.status == :EXHAUSTIVE
-        @test res.mve_selection == best_set
-        @test isapprox(res.mve_sr, best_sr; atol=1e-10, rtol=0)
-        @test count(!iszero, res.mve_weights) == length(best_set)
-        @test abs(_sr_exact(res.mve_weights, μ, Σ; epsilon=0.0) - res.mve_sr) ≤ 1e-7
+        @test res.selection == best_set
+        @test isapprox(res.sr, best_sr; atol=1e-10, rtol=0)
+        @test count(!iszero, res.weights) == length(best_set)
+        @test abs(_sr_exact(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-7
     end
 
     @testset "sampled mode equals exhaustive when sample cap ≥ total" begin
@@ -93,8 +93,8 @@ end
                                         epsilon=0.0, stabilize_Σ=true, compute_weights=true)
         res_cap = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=35,  # ≥ total
                                         epsilon=0.0, stabilize_Σ=true, compute_weights=true)
-        @test res_cap.mve_selection == res_exh.mve_selection
-        @test isapprox(res_cap.mve_sr, res_exh.mve_sr; atol=0, rtol=0)
+        @test res_cap.selection == res_exh.selection
+        @test isapprox(res_cap.sr, res_exh.sr; atol=0, rtol=0)
     end
 
     @testset "RNG reproducibility in sampled mode" begin
@@ -109,8 +109,8 @@ end
                                    rng=rng1, stabilize_Σ=true, compute_weights=true)
         r2 = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=15, epsilon=0.0,
                                    rng=rng2, stabilize_Σ=true, compute_weights=true)
-        @test r1.mve_selection == r2.mve_selection
-        @test isapprox(r1.mve_sr, r2.mve_sr; atol=0, rtol=0)
+        @test r1.selection == r2.selection
+        @test isapprox(r1.sr, r2.sr; atol=0, rtol=0)
     end
 
     @testset "k=1 picks asset with highest μ/√σ² for diagonal Σ" begin
@@ -125,9 +125,9 @@ end
 
         res = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
                                     epsilon=0.0, stabilize_Σ=true, compute_weights=true)
-        @test res.mve_selection == [best]
-        @test count(!iszero, res.mve_weights) == 1
-        @test abs(_sr_exact(res.mve_weights, μ, Σ; epsilon=0.0) - res.mve_sr) ≤ 1e-9
+        @test res.selection == [best]
+        @test count(!iszero, res.weights) == 1
+        @test abs(_sr_exact(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-9
     end
 
     @testset "k=n selects all assets; matches global MVE SR" begin
@@ -138,10 +138,10 @@ end
 
         res = mve_exhaustive_search(μ, Σ, n; exactly_k=true, max_samples_per_k=0,
                                     epsilon=0.0, stabilize_Σ=true, compute_weights=true)
-        @test res.mve_selection == collect(1:n)
+        @test res.selection == collect(1:n)
         mve = compute_mve_sr(μ, Symmetric((Σ + Σ')/2); epsilon=0.0, stabilize_Σ=false)
-        @test isapprox(res.mve_sr, mve; atol=1e-9, rtol=0)
-        @test abs(_sr_exact(res.mve_weights, μ, Σ; epsilon=0.0) - mve) ≤ 1e-9
+        @test isapprox(res.sr, mve; atol=1e-9, rtol=0)
+        @test abs(_sr_exact(res.weights, μ, Σ; epsilon=0.0) - mve) ≤ 1e-9
     end
 
     @testset "near-singular Σ and epsilon stabilization" begin
@@ -153,15 +153,15 @@ end
         # With epsilon > 0, should be well-behaved
         res_eps = mve_exhaustive_search(μ, Σsing, k; exactly_k=true, max_samples_per_k=0,
                                 epsilon=1e-2, stabilize_Σ=true, compute_weights=true)
-        @test isfinite(res_eps.mve_sr)
-        @test count(!iszero, res_eps.mve_weights) == k
+        @test isfinite(res_eps.sr)
+        @test count(!iszero, res_eps.weights) == k
 
-        sr_re = _sr_exact(res_eps.mve_weights, μ, Σsing; epsilon=1e-2, stabilize_Σ=true)
-        @test abs(sr_re - res_eps.mve_sr) ≤ 1e-7
+        sr_re = _sr_exact(res_eps.weights, μ, Σsing; epsilon=1e-2, stabilize_Σ=true)
+        @test abs(sr_re - res_eps.sr) ≤ 1e-7
         # epsilon=0 should also not error (pinv path); may yield 0 SR depending on μ vs span(1)
         res0 = mve_exhaustive_search(μ, Σsing, k; exactly_k=true, max_samples_per_k=0,
                                      epsilon=0.0, stabilize_Σ=true, compute_weights=true)
-        @test isfinite(res0.mve_sr)
+        @test isfinite(res0.sr)
     end
 
     @testset "ties across supports are handled (identical assets)" begin
@@ -170,11 +170,11 @@ end
         Σ = Symmetric(Matrix(0.04I, n, n))   # instead of Symmetric(0.04I)
         res = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
                                     epsilon=0.0, stabilize_Σ=true, compute_weights=true)
-        @test length(res.mve_selection) == k
+        @test length(res.selection) == k
         # All pairs have same SR = ||μ_sel|| / sqrt(w'Σw) with optimal weights; just check finiteness and consistency
-        @test isfinite(res.mve_sr)
-        @test count(!iszero, res.mve_weights) == k
-        @test abs(_sr_exact(res.mve_weights, μ, Σ; epsilon=0.0) - res.mve_sr) ≤ 1e-9
+        @test isfinite(res.sr)
+        @test count(!iszero, res.weights) == k
+        @test abs(_sr_exact(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-9
     end
 
     @testset "argument checks (do_checks=true)" begin
@@ -199,7 +199,7 @@ end
                                         epsilon=0.0, rng=MersenneTwister(1), stabilize_Σ=true)
         r_big   = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=60,
                                         epsilon=0.0, rng=MersenneTwister(1), stabilize_Σ=true)
-        @test r_big.mve_sr + 1e-12 ≥ r_small.mve_sr
+        @test r_big.sr + 1e-12 ≥ r_small.sr
     end
 
     @testset "max_combinations enforces truncation (status) and bounds quality" begin
@@ -219,7 +219,7 @@ end
                                          epsilon=0.0, rng=MersenneTwister(9), stabilize_Σ=true)
         @test res_cap.status == :EXHAUSTIVE_SAMPLED
         # The capped run cannot systematically exceed the full exhaustive SR
-        @test res_cap.mve_sr ≤ res_full.mve_sr + 1e-12
+        @test res_cap.sr ≤ res_full.sr + 1e-12
     end
 
     @testset "max_combinations ≥ total still returns exact (status = :EXHAUSTIVE)" begin
@@ -234,7 +234,7 @@ end
                                      max_combinations=1_000_000, epsilon=0.0, stabilize_Σ=true)
         @test res1.status == :EXHAUSTIVE
         @test res2.status == :EXHAUSTIVE
-        @test res1.mve_selection == res2.mve_selection
-        @test isapprox(res1.mve_sr, res2.mve_sr; atol=0, rtol=0)
+        @test res1.selection == res2.selection
+        @test isapprox(res1.sr, res2.sr; atol=0, rtol=0)
     end
 end

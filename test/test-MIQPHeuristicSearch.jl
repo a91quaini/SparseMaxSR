@@ -43,16 +43,16 @@ end
                                         compute_weights=true, use_refit=false, do_checks=true)
 
         @test res.status isa MOI.TerminationStatusCode
-        @test isfinite(res.mve_sr)
-        @test abs(sum(res.mve_weights) - 1.0) ≤ 1e-10
+        @test isfinite(res.sr)
+        @test abs(sum(res.weights) - 1.0) ≤ 1e-10
         # cardinality: count positive weights approximates chosen support
-        supp = sum(abs.(res.mve_weights) .> 1e-12)
+        supp = sum(abs.(res.weights) .> 1e-12)
         @test m ≤ supp ≤ k
         # box bounds respected for active coords; and never exceed fmax anywhere
-        @test all(res.mve_weights .≤ fmax .+ 1e-12)
-        @test all(res.mve_weights[res.mve_weights .> 1e-12] .≥ minimum(fmin) - 1e-12)
+        @test all(res.weights .≤ fmax .+ 1e-12)
+        @test all(res.weights[res.weights .> 1e-12] .≥ minimum(fmin) - 1e-12)
         # SR consistency with the same stabilization choice
-        @test abs(_sr_internal(res.mve_weights, μ, Σ; epsilon=0.0) - res.mve_sr) ≤ 1e-7
+        @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-7
     end
 
     @testset "k = 1 diagonal-Σ case selects argmax of μ_i - 0.5γσ_i^2 (non-refit)" begin
@@ -68,10 +68,10 @@ end
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=1, γ=γ,
                                         stabilize_Σ=false, compute_weights=true,
                                         use_refit=false, threads=1)
-        @test sum(abs.(res.mve_weights) .> 1e-12) == 1
-        @test findmax(res.mve_weights)[2] == best
-        @test abs(res.mve_weights[best] - 1.0) ≤ 1e-10
-        @test abs(_sr_internal(res.mve_weights, μ, Σ; epsilon=0.0) - res.mve_sr) ≤ 1e-9
+        @test sum(abs.(res.weights) .> 1e-12) == 1
+        @test findmax(res.weights)[2] == best
+        @test abs(res.weights[best] - 1.0) ≤ 1e-10
+        @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-9
     end
 
     @testset "use_refit=true: selection equality, SR equals closed-form refit SR" begin
@@ -91,25 +91,25 @@ end
                                         use_refit=true, threads=1)
 
         # Selection should be identical (refit uses MIQP support)
-        @test r_rf.mve_selection == r_nr.mve_selection
+        @test r_rf.selection == r_nr.selection
 
         # SR should match closed-form refit SR on that support (same stabilization choice)
-        sr_expected = _refit_sr(μ, Σ; selection=r_nr.mve_selection,
+        sr_expected = _refit_sr(μ, Σ; selection=r_nr.selection,
                                 stabilize_Σ=false, epsilon=0.0)
-        @test isapprox(r_rf.mve_sr, sr_expected; atol=1e-9, rtol=0)
+        @test isapprox(r_rf.sr, sr_expected; atol=1e-9, rtol=0)
 
         # Sharpe ratio of the returned refit weights must equal closed-form SR on that support
-        w = r_rf.mve_weights
-        sr_refit = SparseMaxSR.compute_sr(w, μ, Σ; selection=r_rf.mve_selection,
+        w = r_rf.weights
+        sr_refit = SparseMaxSR.compute_sr(w, μ, Σ; selection=r_rf.selection,
                                         stabilize_Σ=false, epsilon=0.0)
-        sr_star  = SparseMaxSR.compute_mve_sr(μ, Σ; selection=r_rf.mve_selection,
+        sr_star  = SparseMaxSR.compute_mve_sr(μ, Σ; selection=r_rf.selection,
                                             stabilize_Σ=false, epsilon=0.0)
 
         @test isfinite(sr_refit)
         @test abs(sr_refit - sr_star) ≤ 1e-8
 
         # Typically (no box constraints here) refit SR ≥ MIQP SR
-        @test r_rf.mve_sr + 1e-12 ≥ r_nr.mve_sr
+        @test r_rf.sr + 1e-12 ≥ r_nr.sr
     end
 
     @testset "use_refit=true with compute_weights=false returns zero vector but correct SR" begin
@@ -122,9 +122,9 @@ end
                                           stabilize_Σ=false, compute_weights=false,
                                           use_refit=true, threads=1)
 
-        @test isempty(setdiff(findall(!iszero, r_rf0.mve_weights), Int[]))  # all zeros
-        sr_expected = _refit_sr(μ, Σ; selection=r_rf0.mve_selection, stabilize_Σ=false, epsilon=0.0)
-        @test isapprox(r_rf0.mve_sr, sr_expected; atol=1e-9, rtol=0)
+        @test isempty(setdiff(findall(!iszero, r_rf0.weights), Int[]))  # all zeros
+        sr_expected = _refit_sr(μ, Σ; selection=r_rf0.selection, stabilize_Σ=false, epsilon=0.0)
+        @test isapprox(r_rf0.sr, sr_expected; atol=1e-9, rtol=0)
     end
 
     @testset "enforcing m (minimum cardinality) and k (non-refit)" begin
@@ -136,10 +136,10 @@ end
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                         stabilize_Σ=false, compute_weights=true,
                                         use_refit=false, threads=1)
-        supp = sum(abs.(res.mve_weights) .> 1e-12)
+        supp = sum(abs.(res.weights) .> 1e-12)
         @test m ≤ supp ≤ k
-        @test abs(sum(res.mve_weights) - 1.0) ≤ 1e-10
-        @test abs(_sr_internal(res.mve_weights, μ, Σ; epsilon=0.0) - res.mve_sr) ≤ 1e-7
+        @test abs(sum(res.weights) - 1.0) ≤ 1e-10
+        @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-7
     end
 
     @testset "respecting fmin/fmax bounds (non-refit)" begin
@@ -156,7 +156,7 @@ end
                                         stabilize_Σ=false, compute_weights=true,
                                         use_refit=false, threads=1)
 
-        x = res.mve_weights
+        x = res.weights
         @test all(x .≤ fmax .+ 1e-12)
         for i in 1:n
             if x[i] > 1e-10
@@ -164,7 +164,7 @@ end
             end
         end
         @test abs(sum(x) - 1.0) ≤ 1e-10
-        @test isfinite(res.mve_sr)
+        @test isfinite(res.sr)
     end
 
     @testset "expand_rounds improve (or not worsen) SR when caps bind (non-refit)" begin
@@ -184,7 +184,7 @@ end
                                         fmin=fmin, fmax=fmax,
                                         expand_rounds=2, expand_factor=2.0, expand_tol=1e-9,
                                         stabilize_Σ=false, use_refit=false, threads=1)
-        @test r2.mve_sr + 1e-12 ≥ r0.mve_sr
+        @test r2.sr + 1e-12 ≥ r0.sr
     end
 
     @testset "epsilon regularization works on near-singular Σ (non-refit)" begin
@@ -197,12 +197,12 @@ end
         r0 = mve_miqp_heuristic_search(μ, Σsing; k=k, γ=1.0,
                                        epsilon=0.0, stabilize_Σ=false,
                                        use_refit=false, threads=1)
-        @test isfinite(r0.mve_sr)
+        @test isfinite(r0.sr)
 
         rE = mve_miqp_heuristic_search(μ, Σsing; k=k, γ=1.0,
                                        epsilon=1e-2, stabilize_Σ=false,
                                        use_refit=false, threads=1)
-        @test isfinite(rE.mve_sr)
+        @test isfinite(rE.sr)
     end
 
     @testset "determinism with threads=1 (same inputs => same outputs) (non-refit)" begin
@@ -218,9 +218,9 @@ end
                                        stabilize_Σ=false, compute_weights=true,
                                        use_refit=false, threads=1)
 
-        @test isapprox(r1.mve_sr, r2.mve_sr; atol=0, rtol=0)
-        @test isapprox(r1.mve_weights, r2.mve_weights; atol=0, rtol=0)
-        @test r1.mve_selection == r2.mve_selection
+        @test isapprox(r1.sr, r2.sr; atol=0, rtol=0)
+        @test isapprox(r1.weights, r2.weights; atol=0, rtol=0)
+        @test r1.selection == r2.selection
     end
 
     @testset "warm starts reproduce the same solution (non-refit)" begin
@@ -233,16 +233,16 @@ end
                                       stabilize_Σ=false, compute_weights=true,
                                       use_refit=false, threads=1)
 
-        v0 = zeros(Int, n); v0[findall(>(1e-10), r.mve_weights)] .= 1
+        v0 = zeros(Int, n); v0[findall(>(1e-10), r.weights)] .= 1
 
         r_restart = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
-                                              x_start=r.mve_weights, v_start=v0,
+                                              x_start=r.weights, v_start=v0,
                                               stabilize_Σ=false, compute_weights=true,
                                               use_refit=false, threads=1)
 
-        @test r_restart.mve_selection == r.mve_selection
-        @test isapprox(r_restart.mve_weights, r.mve_weights; atol=0, rtol=0)
-        @test isapprox(r_restart.mve_sr, r.mve_sr; atol=0, rtol=0)
+        @test r_restart.selection == r.selection
+        @test isapprox(r_restart.weights, r.weights; atol=0, rtol=0)
+        @test isapprox(r_restart.sr, r.sr; atol=0, rtol=0)
     end
 
     @testset "argument checks (do_checks=true)" begin
@@ -274,11 +274,11 @@ end
         res = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                         time_limit=0.1, mipgap=1e-3, threads=1,
                                         stabilize_Σ=false, use_refit=false)
-        @test isfinite(res.mve_sr)
+        @test isfinite(res.sr)
 
         res2 = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                          time_limit=0.1, mipgap=1e-3, threads=1,
                                          stabilize_Σ=false, use_refit=true)
-        @test isfinite(res2.mve_sr)
+        @test isfinite(res2.sr)
     end
 end

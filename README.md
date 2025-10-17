@@ -91,7 +91,7 @@ mve_exhaustive_search(μ::AbstractVector, Σ::AbstractMatrix, k::Integer;
     stabilize_Σ::Bool=true,
     compute_weights::Bool=false,
     do_checks::Bool=false
-) -> (mve_selection, mve_weights, mve_sr, status)
+) -> NamedTuple{(:selection, :weights, :sr, :status)}
 ```
 Searches supports to maximize the **MVE Sharpe ratio**:
 
@@ -116,7 +116,7 @@ mve_lasso_relaxation_search(μ::AbstractVector, Σ::AbstractMatrix, T::Integer;
     compute_weights::Bool=true,
     use_refit::Bool=true,
     do_checks::Bool=false
-) -> (mve_selection, mve_weights, mve_sr, status)
+) -> NamedTuple{(:selection, :weights, :sr, :status)}
 ```
 - Builds a **path** (via `GLMNet`) and picks **the largest support** of size `≤ k`.  
   - If it hits `k` exactly: `status = :LASSO_PATH_EXACT_K`.  
@@ -138,7 +138,7 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
     stabilize_Σ::Bool=true,
     do_checks::Bool=false,
     # ... plus any solver routing / optimizer settings you expose
-) -> (mve_selection, mve_weights, mve_sr, status)
+) -> NamedTuple{(:selection, :weights, :sr, :status)}
 ```
 - A JuMP/MathOptInterface-based heuristic for the cardinality-constrained MVE problem.
 - `use_refit=true` recomputes exact MVE weights on the found support.

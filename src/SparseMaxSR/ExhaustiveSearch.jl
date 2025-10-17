@@ -127,7 +127,7 @@ end
         stabilize_Σ = true,
         compute_weights::Bool=false,
         do_checks=false,
-    ) -> (mve_selection, mve_weights, mve_sr, status)
+    ) -> NamedTuple{(:selection, :weights, :sr, :status)}
 
 Exhaustive (or sampled) search over subsets to maximize the MVE Sharpe ratio
 on the selected indices. By default searches exactly `k` assets; set
@@ -263,10 +263,11 @@ function mve_exhaustive_search(
         zeros(Float64, n) :
         compute_mve_weights(μ, Σs; selection=best_set, epsilon=epsilon, stabilize_Σ=false, do_checks=false)
 
-    return (mve_selection = best_set,
-            mve_weights   = best_w,
-            mve_sr        = best_sr,
-            status        = fully_enumerated ? :EXHAUSTIVE : :EXHAUSTIVE_SAMPLED)
+    return (selection = best_set,
+            weights   = best_w,
+            sr        = best_sr,
+            status    = fully_enumerated ? :EXHAUSTIVE : :EXHAUSTIVE_SAMPLED)
+
 end
 
 end # module

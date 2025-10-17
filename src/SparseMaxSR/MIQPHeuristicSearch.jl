@@ -112,7 +112,7 @@ end
 """
     mve_miqp_heuristic_search(μ, Σ; k,
                               m::Int=0, γ::Float64=1.0,
-                              fmin=zeros(N), fmax=ones(N),
+                              fmin=zeros(length(μ)), fmax=ones(length(μ)),
                               expand_rounds::Int=2,
                               expand_factor::Float64=2.0,
                               expand_tol::Float64=1e-7,
@@ -125,11 +125,7 @@ end
                               verbose::Bool=false,
                               epsilon::Real=EPS_RIDGE,
                               stabilize_Σ::Bool=true,
-                              do_checks::Bool=false)
-        -> (mve_selection::Vector{Int},
-            mve_weights::Vector{Float64},
-            mve_sr::Float64,
-            status)
+                              do_checks::Bool=false) -> NamedTuple{(:selection, :weights, :sr, :status)}
 
 Heuristic MIQP for mean–variance efficient (MVE) selection with cardinality and
 box constraints. The model solves
@@ -221,18 +217,18 @@ function mve_miqp_heuristic_search(
     if !use_refit
         # Original behavior: SR from MIQP x; weights optionally returned as x
         w = compute_weights ? sol.x : zeros(Float64, N)
-        return (mve_selection=subset,
-                mve_weights=w,
-                mve_sr=sol.sr,
+        return (selection=subset,
+                weights=w,
+                sr=sol.sr,
                 status=sol.status)
     else
         # Refit on MIQP support: SR/weights from closed-form MVE on Σs
         if isempty(subset)
             # No active names — nothing to refit
             w = zeros(Float64, N)
-            return (mve_selection=subset,
-                    mve_weights=w,
-                    mve_sr=-Inf,
+            return (selection=subset,
+                    weights=w,
+                    sr=0.0,
                     status=sol.status)
         end
         sr_refit = compute_mve_sr(μ, Σs; selection=subset,
@@ -241,9 +237,9 @@ function mve_miqp_heuristic_search(
                   compute_mve_weights(μ, Σs; selection=subset,
                                       epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
                   zeros(Float64, N)
-        return (mve_selection=subset,
-                mve_weights=w_refit,
-                mve_sr=sr_refit,
+        return (selection=subset,
+                weights=w_refit,
+                sr=sr_refit,
                 status=sol.status)
     end
 end

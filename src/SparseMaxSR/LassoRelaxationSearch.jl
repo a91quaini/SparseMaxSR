@@ -125,7 +125,7 @@ end
         compute_weights::Bool = false,
         use_refit::Bool = true,
         do_checks::Bool = false
-    ) -> (selection::Vector{Int}, weights::Vector{Float64}, sr::Float64, status::Symbol)
+    ) -> NamedTuple{(:selection, :weights, :sr, :status)}
 
 Path-based elastic net on returns: regress `y` on `R` with no intercept and take the
 largest support `s ≤ k` from the λ-path. If `use_refit=true`, refit exact MVE on this
@@ -164,7 +164,10 @@ function mve_lasso_relaxation_search(
 
     # quick exit if no support found (keep path status)
     if isempty(best_idx)
-        return (best_idx, zeros(Float64, N), 0.0, use_refit ? path_status : :LASSO_ALLEMPTY)
+        return (selection = best_idx, 
+                weights = zeros(Float64, N), 
+                sr = 0.0, 
+                status = use_refit ? path_status : :LASSO_ALLEMPTY)
     end
 
     # moments & stabilized Σ (once)
@@ -180,13 +183,19 @@ function mve_lasso_relaxation_search(
              compute_mve_weights(μ, Σs; selection=best_idx,
                                  epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
              zeros(Float64, N)
-        return (sort(best_idx), w, sr, path_status)
+        return (selection = sort(best_idx), 
+                weights = w, 
+                sr = sr, 
+                status = path_status)
     else
         # Normalize-coeffs branch with |sum(w)| = 1 if possible; else ALLEMPTY
         w, all_empty = _normalized_lasso_weights(βj, best_idx, N)
         status_final = all_empty ? :LASSO_ALLEMPTY : path_status
         sr = all_empty ? 0.0 : compute_sr(w, μ, Σs; stabilize_Σ=false, do_checks=false)
-        return (sort(best_idx), w, sr, status_final)
+        return (selection = sort(best_idx), 
+                weights = w, 
+                sr = sr, 
+                status = status_final)
     end
 end
 
@@ -235,7 +244,10 @@ function mve_lasso_relaxation_search(
     )
 
     if isempty(best_idx)
-        return (best_idx, zeros(Float64, N), 0.0, use_refit ? path_status : :LASSO_ALLEMPTY)
+        return (selection = best_idx, 
+                weights = zeros(Float64, N), 
+                sr = 0.0, 
+                status = use_refit ? path_status : :LASSO_ALLEMPTY)
     end
 
     if use_refit
@@ -245,12 +257,18 @@ function mve_lasso_relaxation_search(
              compute_mve_weights(μ, Σs; selection=best_idx,
                                  epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
              zeros(Float64, N)
-        return (sort(best_idx), w, sr, path_status)
+        return (selection = sort(best_idx), 
+                weights = w, 
+                sr = sr, 
+                status = path_status)
     else
         w, all_empty = _normalized_lasso_weights(βj, best_idx, N)
         status_final = all_empty ? :LASSO_ALLEMPTY : path_status
         sr = all_empty ? 0.0 : compute_sr(w, μ, Σs; stabilize_Σ=false, do_checks=false)
-        return (sort(best_idx), w, sr, status_final)
+        return (selection = sort(best_idx), 
+                weights = w, 
+                sr = sr, 
+                status = status_final)
     end
 end
 

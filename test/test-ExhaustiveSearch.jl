@@ -183,6 +183,7 @@ end
         @test_throws ErrorException mve_exhaustive_search(μ, Σ, 0; do_checks=true)
         @test_throws ErrorException mve_exhaustive_search(μ, Σ, 3; do_checks=true)
         @test_throws ErrorException mve_exhaustive_search(μ, Σ, 1; max_samples_per_k=-1, do_checks=true)
+        @test_throws ErrorException mve_exhaustive_search(μ, Σ, 1; max_combinations=0, do_checks=true)
         @test_throws ErrorException mve_exhaustive_search([0.1, Inf], Σ, 1; do_checks=true)
         @test_throws ErrorException mve_exhaustive_search(μ, [NaN 0; 0 1], 1; do_checks=true)
     end
@@ -199,5 +200,41 @@ end
         r_big   = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=60,
                                         epsilon=0.0, rng=MersenneTwister(1), stabilize_Σ=true)
         @test r_big.mve_sr + 1e-12 ≥ r_small.mve_sr
+    end
+
+    @testset "max_combinations enforces truncation (status) and bounds quality" begin
+        Random.seed!(33)
+        n, k = 8, 4                       # C(8,4)=70
+        μ = 0.02 .+ 0.05 .* rand(n)
+        A = randn(n,n); Σ = Symmetric(A*A' + 0.10I)
+
+        res_full = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
+                                         max_combinations=10_000,  # >> total, so full enumeration
+                                         epsilon=0.0, stabilize_Σ=true)
+        @test res_full.status == :EXHAUSTIVE
+
+        # Force truncation/sampling via a tight max_combinations
+        res_cap  = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
+                                         max_combinations=20,      # << total, triggers sampled path
+                                         epsilon=0.0, rng=MersenneTwister(9), stabilize_Σ=true)
+        @test res_cap.status == :EXHAUSTIVE_SAMPLED
+        # The capped run cannot systematically exceed the full exhaustive SR
+        @test res_cap.mve_sr ≤ res_full.mve_sr + 1e-12
+    end
+
+    @testset "max_combinations ≥ total still returns exact (status = :EXHAUSTIVE)" begin
+        Random.seed!(44)
+        n, k = 7, 3                       # total = 35
+        μ = 0.01 .+ 0.02 .* rand(n)
+        A = randn(n,n); Σ = Symmetric(A*A' + 0.06I)
+
+        res1 = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
+                                     max_combinations=35, epsilon=0.0, stabilize_Σ=true)
+        res2 = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
+                                     max_combinations=1_000_000, epsilon=0.0, stabilize_Σ=true)
+        @test res1.status == :EXHAUSTIVE
+        @test res2.status == :EXHAUSTIVE
+        @test res1.mve_selection == res2.mve_selection
+        @test isapprox(res1.mve_sr, res2.mve_sr; atol=0, rtol=0)
     end
 end

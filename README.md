@@ -1,171 +1,336 @@
 # SparseMaxSR.jl
 
-SparseMaxSR.jl provides fast, reproducible utilities for **sparse maximum–Sharpe** portfolio selection in Julia. It includes:
+SparseMaxSR is a Julia package for **mean–variance portfolio selection with cardinality constraints**. It focuses on selecting **at most/ exactly _k_ assets out of _N_** to **maximize the Sharpe ratio** (or compute the mean-variance efficient weights on a given support). The toolbox currently offers:
 
-- **Sharpe & MVE utilities**
-  - `compute_sr(w, μ, Σ)` — Sharpe ratio of given weights.
-  - `compute_mve_sr(μ, Σ; selection=:)` — Maximum Sharpe on a support.
-  - `compute_mve_weights(μ, Σ; selection=:)` — Mean–variance efficient (MVE) weights.
-- **k‑sparse selection**
-  - `compute_mve_selection(μ, Σ, k; method=:exhaustive or :cutting_planes)` — choose `k` assets to maximize Sharpe.  
-    Cutting‑planes scales to larger problems; exhaustive is exact for small ones.
-- **Solver‑friendly design**
-  - Works with free solvers (SCS, Clarabel, COSMO, HiGHS, GLPK) and commercial ones (CPLEX, Mosek, Gurobi).
-  - A **default conic/QP solver** is auto‑detected and can be **persisted** across sessions via `Preferences.jl`.
+- **Exhaustive/Random Search** over supports (with hard caps to keep runtime bounded).
+- **MIQP Heuristic Search** (via JuMP/MathOptInterface; supports optional refit).
+- **LASSO Relaxation Search** (path-based support discovery; vanilla normalization or refit).
+- **Core Sharpe-ratio utilities** (MVE Sharpe and weights).
+
+It is designed for **reproducible experiments** across small, medium, and very large universes.
 
 ---
 
 ## Installation
 
-Add the package (replace URL if you host under a different org/user):
+### Option A — develop locally (recommended while iterating)
 
 ```julia
-pkg> add https://github.com/<your-user-or-org>/SparseMaxSR.jl
+julia> using Pkg
+julia> Pkg.activate(".")           # your project
+julia> Pkg.develop(path="/path/to/SparseMaxSR")
+julia> using SparseMaxSR
 ```
 
-If developing locally:
+### Option B — add from Git (if hosted)
 
 ```julia
-pkg> dev /path/to/SparseMaxSR
-pkg> activate /path/to/SparseMaxSR
-pkg> instantiate
-pkg> test
+julia> using Pkg
+julia> Pkg.add(url="https://github.com/<org>/SparseMaxSR.jl")
+julia> using SparseMaxSR
 ```
 
-### Optional solvers
-
-Install any of the following as needed:
-
-```julia
-pkg> add SCS Clarabel COSMO HiGHS GLPK
-# (commercial) pkg> add CPLEX MosekTools Gurobi
-```
-
-> Commercial solvers require external installation/licensing.
+> If you maintain separate solver backends (SCS/HiGHS/Mosek), add them to your environment as needed (see **Dependencies**).
 
 ---
 
-## Quickstart
+## Dependencies
+
+Core (direct):
+
+- `LinearAlgebra`, `Statistics`, `Random`
+- `Combinatorics` (for combinations)
+- `JuMP` and `MathOptInterface` (MIQP heuristic)
+- `GLMNet` (LASSO path; used in relaxation search)
+
+Suggested / optional:
+
+- One or more conic/MIP solvers (depending on your MIQP heuristic):  
+  `HiGHS`, `CPLEX`, `MosekTools`, `Gurobi`, `SCS`, `Clarabel`, `COSMO`, etc.
+
+---
+
+## Exported API (overview)
+
+Below are the **main user-facing functions** you’ll typically use in experiments. All functions return **named tuples** whenever multiple outputs are expected (selection, weights, SR, status).
+
+### SharpeRatio
 
 ```julia
+compute_sr(w::AbstractVector, μ::AbstractVector, Σ::AbstractMatrix;
+           epsilon::Real=EPS_RIDGE, stabilize_Σ::Bool=true, do_checks::Bool=false) -> Real
+```
+Compute the portfolio Sharpe ratio of weights `w` given `(μ, Σ)`. If `stabilize_Σ=true`, a ridge-stabilized covariance `Σ + ε·mean(diag(Σ))·I` is used internally (controlled by `epsilon`).
+
+```julia
+compute_mve_sr(μ::AbstractVector, Σ::AbstractMatrix;
+               selection::AbstractVector{<:Integer}=Int[],
+               epsilon::Real=EPS_RIDGE, stabilize_Σ::Bool=true, do_checks::Bool=false) -> Real
+```
+Compute the **maximum** Sharpe ratio achievable by the **mean-variance efficient** portfolio **restricted to a support** `selection` (if empty, uses all assets).
+
+```julia
+compute_mve_weights(μ::AbstractVector, Σ::AbstractMatrix;
+                    selection::AbstractVector{<:Integer}=Int[],
+                    epsilon::Real=EPS_RIDGE, stabilize_Σ::Bool=true, do_checks::Bool=false) -> Vector{Float64}
+```
+Return the corresponding **MVE weights** on `selection` (full-length vector with zeros outside the support).
+
+---
+
+### ExhaustiveSearch
+
+```julia
+mve_exhaustive_search(μ::AbstractVector, Σ::AbstractMatrix, k::Integer;
+    exactly_k::Bool=true,
+    max_samples_per_k::Int=0,
+    max_combinations::Int=10_000_000,
+    epsilon::Real=EPS_RIDGE,
+    rng::AbstractRNG=Random.default_rng(),
+    γ::Real=1.0,
+    stabilize_Σ::Bool=true,
+    compute_weights::Bool=false,
+    do_checks::Bool=false
+) -> (mve_selection, mve_weights, mve_sr, status)
+```
+Searches supports to maximize the **MVE Sharpe ratio**:
+
+- If `max_samples_per_k == 0`, it **tries** to enumerate all combinations at each size, but will **cap the total work** per size at `max_combinations`; when the cap binds, the routine switches to **sampling without replacement** up to the cap.
+- If `max_samples_per_k > 0`, it samples up to that many supports per size (also bounded by the number of available combinations).
+- `exactly_k=true` restricts to size `k`; set `false` to search all sizes in `1:k`.
+- Returns `status = :EXHAUSTIVE` if full enumeration happened for all tried sizes, otherwise `:EXHAUSTIVE_SAMPLED`.
+
+---
+
+### LassoRelaxationSearch
+
+```julia
+mve_lasso_relaxation_search(μ::AbstractVector, Σ::AbstractMatrix, T::Integer;
+    k::Integer,
+    nlambda::Int=100,
+    lambda_min_ratio::Real=1e-5,
+    alpha::Real=1.0,                  # Elastic Net mixing; 1.0 = LASSO
+    standardize::Bool=false,
+    epsilon::Real=EPS_RIDGE,
+    stabilize_Σ::Bool=true,
+    compute_weights::Bool=true,
+    use_refit::Bool=true,
+    do_checks::Bool=false
+) -> (mve_selection, mve_weights, mve_sr, status)
+```
+- Builds a **path** (via `GLMNet`) and picks **the largest support** of size `≤ k`.  
+  - If it hits `k` exactly: `status = :LASSO_PATH_EXACT_K`.  
+  - Otherwise: `status = :LASSO_PATH_ALMOST_K`.  
+  - If no variables selected along the path: `status = :LASSO_ALLEMPTY`.
+- **Vanilla**: set `use_refit=false` to **normalize the coefficients** into portfolio weights (sum-to-one if possible).
+- **Refit**: set `use_refit=true` to compute **exact MVE weights on the selected support**.
+
+---
+
+### MIQPHeuristicSearch
+
+```julia
+mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
+    k::Integer,
+    compute_weights::Bool=true,
+    use_refit::Bool=false,
+    epsilon::Real=EPS_RIDGE,
+    stabilize_Σ::Bool=true,
+    do_checks::Bool=false,
+    # ... plus any solver routing / optimizer settings you expose
+) -> (mve_selection, mve_weights, mve_sr, status)
+```
+- A JuMP/MathOptInterface-based heuristic for the cardinality-constrained MVE problem.
+- `use_refit=true` recomputes exact MVE weights on the found support.
+- `status` typically reflects the solver’s termination status (e.g., `MOI.OPTIMAL`) or a symbolic flag from the heuristic.
+
+---
+
+## Example: Comparing Exhaustive, LASSO (vanilla/refit), and MIQP (vanilla/refit)
+
+Save as `example.jl`, then run:
+
+```bash
+julia --project=. example.jl
+```
+
+```julia
+#!/usr/bin/env julia
+
 using SparseMaxSR
-using Random, LinearAlgebra
+using Random, LinearAlgebra, Statistics, Printf, Dates
+using Combinatorics: binomial
+import MathOptInterface as MOI
 
-# synthetic instance
-Random.seed!(1)
-n, k = 12, 4
-μ = 0.03 .+ 0.12 .* rand(n)
+# --------------------------------
+# Helpers
+# --------------------------------
+timestamp() = Dates.format(now(), dateformat"yyyy-mm-dd HH:MM:SS")
 
-A = randn(n,n)
-Σ = Symmetric(A*A' .+ 0.05I)  # SPD-ish
+# Simulate returns with a mild 2-factor structure + noise
+function simulate_returns(T::Int, N::Int; nf::Int=2, beta_scale=0.3, eps_scale=0.7,
+                          rng=Random.default_rng())
+    F = randn(rng, T, nf)
+    B = beta_scale .* randn(rng, N, nf)
+    E = eps_scale  .* randn(rng, T, N)
+    return F * B' .+ E
+end
 
-# Unconstrained MVE weights and Sharpe
-w  = compute_mve_weights(μ, Σ)      # returns Vector{Float64}
-sr = compute_sr(w, μ, Σ)
+means_and_cov(R) = (vec(mean(R, dims=1)), cov(R; corrected=true))
+cell(sr, t) = isnan(sr) ? "-" : @sprintf("%.4f / %.2fs", sr, t)
+_fmt_ks(v::Vector{Int}) = isempty(v) ? "(none)" : join(sort(unique(v)), ", ")
 
-# k-sparse selection (auto-chooses a method & conic solver)
-sel = compute_mve_selection(μ, Σ, k)  # Vector{Int} of length k
+# --------------------------------
+# Runners
+# --------------------------------
+function run_exhaustive(μ, Σ, k; exactly_k=true, max_combinations=3_000_000)
+    tsec = @elapsed begin
+        res = SparseMaxSR.mve_exhaustive_search(μ, Σ, k;
+            exactly_k=exactly_k, max_samples_per_k=0, max_combinations=max_combinations,
+            epsilon=SparseMaxSR.Utils.EPS_RIDGE, stabilize_Σ=true,
+            compute_weights=true, do_checks=false)
+        global sel = res.mve_selection; global w = res.mve_weights
+        global sr = res.mve_sr;         global st = res.status
+    end
+    return sel, w, sr, tsec, st
+end
 
-# Maximum Sharpe restricted to the selected support
-sr_k = compute_mve_sr(μ, Σ; selection=sel)
+function run_miqp_vanilla(μ, Σ, k)
+    tsec = @elapsed begin
+        res = SparseMaxSR.mve_miqp_heuristic_search(μ, Σ; k=k,
+            compute_weights=true, use_refit=false)
+        global sel = res.mve_selection; global w = res.mve_weights
+        global sr = res.mve_sr;         global st = res.status
+    end
+    return sel, w, sr, tsec, st
+end
+
+function run_miqp_refit(μ, Σ, k)
+    tsec = @elapsed begin
+        res = SparseMaxSR.mve_miqp_heuristic_search(μ, Σ; k=k,
+            compute_weights=true, use_refit=true)
+        global sel = res.mve_selection; global w = res.mve_weights
+        global sr = res.mve_sr;         global st = res.status
+    end
+    return sel, w, sr, tsec, st
+end
+
+# LASSO runners (moment-based entry)
+function run_lasso_vanilla(R, μ, Σ, k; alpha=0.95)
+    tsec = @elapsed begin
+        res = SparseMaxSR.mve_lasso_relaxation_search(μ, Σ, size(R,1);
+            k=k, nlambda=100, lambda_min_ratio=1e-5, alpha=alpha, standardize=false,
+            epsilon=SparseMaxSR.Utils.EPS_RIDGE, stabilize_Σ=true,
+            compute_weights=true, use_refit=false, do_checks=false)
+        global sel = res.mve_selection; global w = res.mve_weights
+        global sr = res.mve_sr;         global st = res.status
+    end
+    return sel, w, sr, tsec, st
+end
+
+function run_lasso_refit(R, μ, Σ, k; alpha=0.95)
+    tsec = @elapsed begin
+        res = SparseMaxSR.mve_lasso_relaxation_search(μ, Σ, size(R,1);
+            k=k, nlambda=100, lambda_min_ratio=1e-5, alpha=alpha, standardize=false,
+            epsilon=SparseMaxSR.Utils.EPS_RIDGE, stabilize_Σ=true,
+            compute_weights=true, use_refit=true, do_checks=false)
+        global sel = res.mve_selection; global w = res.mve_weights
+        global sr = res.mve_sr;         global st = res.status
+    end
+    return sel, w, sr, tsec, st
+end
+
+# Pretty table
+function print_table(title::AbstractString, ks::Vector{Int},
+                     methods::Vector{String}, cells::Dict{Tuple{Int,String},String})
+    println("\n$title")
+    println("-"^max(10, length(title)))
+    @printf("%-6s", "k")
+    for m in methods
+        @printf(" | %-18s", m)
+    end
+    println()
+    println("-"^(6 + length(methods)*(3+18)))
+    for k in ks
+        @printf("%-6d", k)
+        for m in methods
+            c = get(cells, (k,m), "-")
+            @printf(" | %-18s", c)
+        end
+        println()
+    end
+    println()
+end
+
+# --------------------------------
+# Experiment A: T=500, N=30, k in 1,3,5,7,9
+# --------------------------------
+Random.seed!(42)
+T, N = 500, 30
+ks = [1,3,5,7,9]
+methods = ["EXHAUSTIVE", "LASSO-VANILLA", "LASSO-REFIT", "MIQP-VANILLA", "MIQP-REFIT"]
+
+cells = Dict{Tuple{Int,String},String}()
+lasso_almost = Int[]; lasso_empty = Int[]; miqp_notopt = Int[]
+
+println("SparseMaxSR example — $(timestamp())")
+println("Experiment A: T=$T, N=$N; methods=$(join(methods, \", \"))")
+R = simulate_returns(T, N)
+μ, Σ = means_and_cov(R)
+
+EXH_CAP = 3_000_000  # cap combinations for exhaustive
+
+for k in ks
+    # Exhaustive (guarded by cap)
+    if binomial(N, k) <= EXH_CAP
+        try
+            _, _, sr, t, st = run_exhaustive(μ, Σ, k; exactly_k=true, max_combinations=EXH_CAP)
+            cells[(k,"EXHAUSTIVE")] = cell(sr, t) * (st == :EXHAUSTIVE ? "" : " *")
+        catch
+            cells[(k,"EXHAUSTIVE")] = "ERR"
+        end
+    else
+        cells[(k,"EXHAUSTIVE")] = "SKIP"
+    end
+
+    # LASSO
+    try
+        _, _, sr, t, st = run_lasso_vanilla(R, μ, Σ, k; alpha=0.99)
+        cells[(k,"LASSO-VANILLA")] = st == :LASSO_ALLEMPTY ?
+            @sprintf("%-18s", "EMPTY / $(round(t; digits=2))s") : cell(sr, t)
+        st == :LASSO_PATH_ALMOST_K  && push!(lasso_almost, k)
+        st == :LASSO_ALLEMPTY       && push!(lasso_empty,  k)
+    catch
+        cells[(k,"LASSO-VANILLA")] = "ERR"
+    end
+    try
+        _, _, sr, t, st = run_lasso_refit(R, μ, Σ, k; alpha=0.99)
+        cells[(k,"LASSO-REFIT")] = cell(sr, t)
+        st == :LASSO_PATH_ALMOST_K && push!(lasso_almost, k)
+    catch
+        cells[(k,"LASSO-REFIT")] = "ERR"
+    end
+
+    # MIQP
+    try
+        _, _, sr, t, st = run_miqp_vanilla(μ, Σ, k)
+        cells[(k,"MIQP-VANILLA")] = cell(sr, t)
+        st != MOI.OPTIMAL && push!(miqp_notopt, k)
+    catch
+        cells[(k,"MIQP-VANILLA")] = "ERR"
+    end
+    try
+        _, _, sr, t, st = run_miqp_refit(μ, Σ, k)
+        cells[(k,"MIQP-REFIT")] = cell(sr, t)
+        st != MOI.OPTIMAL && push!(miqp_notopt, k)
+    catch
+        cells[(k,"MIQP-REFIT")] = "ERR"
+    end
+end
+
+print_table("Results — Experiment A (T=500, N=30)", ks, methods, cells)
+println("LASSO (both): support size < k for k ∈ {" * _fmt_ks(lasso_almost) * "}")
+println("LASSO-VANILLA: ALLEMPTY for k ∈ {" * _fmt_ks(lasso_empty) * "}")
+println("MIQP: solver not OPTIMAL for k ∈ {" * _fmt_ks(miqp_notopt) * "}")
+println("\nNote: an asterisk '*' next to EXHAUSTIVE means the run hit the max_combinations cap and fell back to sampling.")
 ```
-
-**Tip:** If Σ is ill‑conditioned/noisy, increase the global ridge:
-
-```julia
-import SparseMaxSR: set_default_ridge!
-set_default_ridge!(1e-4)
-```
-
----
-
-## Choosing and persisting solvers
-
-SparseMaxSR separates **two** solver roles in the cutting‑planes method:
-
-1. **Conic/QP dual solver** (used for dual relaxations): SCS / Clarabel / COSMO / Mosek
-2. **MILP master solver** (for the master problem): HiGHS / GLPK / CPLEX / Gurobi / Mosek
-
-You can:
-
-### A) Persist your preferred conic/QP solver across sessions
-
-```julia
-# Once per environment (saved via Preferences.jl)
-using SparseMaxSR
-save_default_solver!("Clarabel")   # or "SCS", "COSMO", "auto"
-```
-
-### B) Override the conic/QP solver for the current session only
-
-```julia
-using SparseMaxSR, Clarabel
-set_default_optimizer!(() -> Clarabel.Optimizer())
-```
-
-### C) Specify explicit solvers per call (recommended for cutting‑planes)
-
-```julia
-using HiGHS, Clarabel
-sel = compute_mve_selection(μ, Σ, 10;
-    method         = :cutting_planes,
-    optimizer      = () -> HiGHS.Optimizer(),      # MILP master
-    dual_optimizer = () -> Clarabel.Optimizer()    # conic/QP duals
-)
-```
-
-> If you don’t set anything, the conic/QP dual solver is **auto‑detected**
-> in this order: **SCS → Clarabel → COSMO**. You must pass a MILP master
-> when using `method=:cutting_planes`.
-
----
-
-## API Sketch
-
-### `compute_sr(w, μ, Σ; selection=Int[], epsilon=EPS_RIDGE[], do_checks=false) -> Float64`
-Sharpe ratio `SR = (w'μ) / sqrt(w'Σw)`. If `selection` is provided, the SR is computed on that subvector/submatrix. A ridge `epsilon` (default `EPS_RIDGE[]`) can stabilize Σ.
-
-### `compute_mve_weights(μ, Σ; selection=Int[], γ=1.0, epsilon=EPS_RIDGE[], do_checks=false) -> Vector{Float64}`
-Unconstrained MVE weights `w = (1/γ) Σ⁻¹ μ`. Zeros off‑selection. Uses Cholesky/pinv as appropriate.
-
-### `compute_mve_sr(μ, Σ; selection=Int[], epsilon=EPS_RIDGE[], do_checks=false) -> Float64`
-Maximum Sharpe on a support computed via MVE weights.
-
-### `compute_mve_selection(μ, Σ, k; method=:auto, exhaustive_threshold=20, exhaustive_max_combs=200_000, optimizer=nothing, attrs=NamedTuple(), dual_optimizer=nothing, dual_attrs=NamedTuple(), epsilon=EPS_RIDGE[], rng=Random.default_rng()) -> Vector{Int}`
-Choose `k` assets to (approximately) maximize Sharpe.  
-- `:exhaustive` is exact for small problems.  
-- `:cutting_planes` scales to larger `n` and `k`.  
-- Pass `optimizer` for the **MILP** master; `dual_optimizer` for the **conic/QP** subproblems.  
-- Use `attrs`/`dual_attrs` to pass solver parameters (via `MOI.RawParameter`).
-
----
-
-## Configuration & tips
-
-- **Ridge:** Set once globally with `set_default_ridge!(ε)`; or override per call via `epsilon=...`.
-- **Reproducibility:** Many routines accept `rng` — pass your own `MersenneTwister` to fix randomness.
-- **Time limits / gaps (MILP):** Use `attrs = (; "time_limit" => 120.0, "mip_gap" => 0.01)` (keys are solver‑specific).
-
----
-
-## Testing
-
-From the package root:
-
-```julia
-pkg> test
-```
-
-The suite skips solver‑specific tests when a solver is not installed. Install HiGHS/GLPK/Clarabel/COSMO/SCS/CPLEX/MosekTools to enable more coverage.
-
----
-
-## Citing
-
-If this package is useful in academic work, please cite Markowitz (1952) and algorithmic references on cutting‑planes for sparse portfolio selection (e.g., Kelley cutting‑planes / in‑out methods).
-
----
-
-## License
-
-MIT © 2025 SparseMaxSR contributors

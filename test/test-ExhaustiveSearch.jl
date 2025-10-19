@@ -259,8 +259,8 @@ end
         @test isapprox(r_unnorm.sr, r_norm.sr; atol=0, rtol=0)
 
         # Normalized weights: sum to one and proportional to unnormalized
-        @test abs(sum(r_norm.weights) - 1.0) ≤ 1e-10
-        @test norm(r_norm.weights - (r_unnorm.weights / sum(r_unnorm.weights))) ≤ 1e-8
+        @test abs(abs(sum(r_norm.weights)) - 1.0) ≤ 1e-10
+        @test norm(r_norm.weights - (r_unnorm.weights / max(abs(sum(r_unnorm.weights)), eps()))) ≤ 1e-8
 
         # Zeros off-support
         sel = r_norm.selection

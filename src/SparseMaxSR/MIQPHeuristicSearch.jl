@@ -4,7 +4,7 @@ using LinearAlgebra, Statistics
 using JuMP, CPLEX
 import MathOptInterface as MOI
 import ..SharpeRatio: compute_sr, compute_mve_sr, compute_mve_weights
-import ..Utils: EPS_RIDGE, _prep_S
+import ..Utils: EPS_RIDGE, _prep_S, make_weights_sum1
 
 export mve_miqp_heuristic_search
 
@@ -318,9 +318,8 @@ function mve_miqp_heuristic_search(
         # Vanilla MIQP portfolio (optionally normalize to sum=1 with safeguard)
         w = compute_weights ? copy(sol.x) : zeros(Float64, N)
         if compute_weights && weights_sum1
-            s = sum(w)
-            denom = (abs(s) > 1e-7) ? s : (sign(s) * 1e-7)
-            @inbounds w ./= denom
+            # Classic budget for MIQP outputs: sum(w) = 1
+            w, _, _ = make_weights_sum1(w; mode=:abs)
         end
         return (selection=subset, weights=w, sr=sol.sr, status=sol.status)
     else

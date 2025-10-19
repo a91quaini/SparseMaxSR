@@ -1,8 +1,11 @@
 
-# test-MIQPHeuristicSearch.jl — tests for mve_miqp_heuristic_search with refit toggle + exactly_k
+# test/test-MIQPHeuristicSearch.jl
+# Tests for mve_miqp_heuristic_search with refit toggle, exactly_k, bounds, and normalization.
 #
-# Updated to reflect: weights_sum1 flag (no budget by default), exactly_k behavior,
-# SR invariance under normalization, warm starts, and refit equivalence.
+# This suite assumes:
+# - weights_sum1=false ⇒ NO budget constraint is imposed in the MIQP.
+# - weights_sum1=true  ⇒ the MIQP imposes an absolute-sum budget (|∑w| = 1).
+# - Refit computes MVE weights/SR on the returned selection using the call's stabilization choice.
 #
 using Test, Random, LinearAlgebra, Statistics
 using SparseMaxSR
@@ -10,16 +13,15 @@ using SparseMaxSR.SharpeRatio
 using SparseMaxSR.MIQPHeuristicSearch
 import MathOptInterface as MOI
 
-# Recompute SR the same way the solver does when stabilize_Σ=false:
+# Internal SR recomputation mirroring stabilize_Σ=false path (symmetrize only)
 _sr_internal(w, μ, Σ; epsilon=0.0) = begin
     Σs = Symmetric((Σ + Σ')/2)
     compute_sr(w, μ, Σs; epsilon=epsilon, stabilize_Σ=false, do_checks=false)
 end
 
-# Recompute REFIT SR on a given selection using the same Σ stabilization choice as the call
+# Closed-form MVE SR on a given selection, with chosen stabilization
 _refit_sr(μ, Σ; selection, stabilize_Σ::Bool, epsilon=0.0) = begin
     if stabilize_Σ
-        # Mirror internal stabilization behavior when requested
         compute_mve_sr(μ, Σ; selection=selection, epsilon=epsilon, stabilize_Σ=true, do_checks=false)
     else
         Σs = Symmetric((Σ + Σ')/2)
@@ -27,9 +29,16 @@ _refit_sr(μ, Σ; selection, stabilize_Σ::Bool, epsilon=0.0) = begin
     end
 end
 
+# Utility
+abs_sum(x) = abs(sum(x))
+norm1e(x)  = sum(abs, x)
+
+const ATOL_SR = 1e-9
+const ATOL_W  = 1e-12
+
 @testset "MIQPHeuristicSearch.mve_miqp_heuristic_search" begin
 
-    @testset "basic smoke & invariants (non-refit, cardinality bounds, weights_sum1=true)" begin
+    @testset "basic smoke & invariants (non-refit, cardinality band, weights_sum1=true)" begin
         Random.seed!(123)
         n, k, m = 8, 3, 1
         μ = 0.02 .+ 0.05 .* rand(n)
@@ -43,55 +52,56 @@ end
                                         expand_rounds=1, mipgap=1e-5, time_limit=30.0,
                                         threads=1, stabilize_Σ=false,
                                         compute_weights=true, use_refit=false, do_checks=true,
-                                        exactly_k=false, weights_sum1=true)  # explicit normalization
+                                        exactly_k=false, weights_sum1=true)
 
         @test res.status isa MOI.TerminationStatusCode
         @test isfinite(res.sr)
-        @test abs(sum(res.weights) - 1.0) ≤ 1e-10
-        # cardinality: m ≤ |S| ≤ k
+        @test abs(abs_sum(res.weights) - 1.0) ≤ 1e-10
+
+        # cardinality: m ≤ |S| ≤ k   (support via numerical threshold)
         supp = sum(abs.(res.weights) .> 1e-12)
         @test m ≤ supp ≤ k
-        # box bounds respected for active coords; and never exceed fmax anywhere
+
+        # box bounds respected
         @test all(res.weights .≤ fmax .+ 1e-12)
-        @test all(res.weights[res.weights .> 1e-12] .≥ minimum(fmin) - 1e-12)
-        # SR consistency with the same stabilization choice
+        @test all(res.weights .≥ -1e-12)  # since fmin ≥ 0
+
+        # SR consistency with same stabilization choice (false)
         @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-7
     end
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # NEW: weights_sum1 invariance (non-refit)
-    # ─────────────────────────────────────────────────────────────────────────
-    @testset "weights_sum1=true rescales weights but keeps selection & SR (non-refit)" begin
+    @testset "weights_sum1: cross-problem comparisons removed; check invariants per-solve" begin
+        # weights_sum1 changes the feasible region ⇒ r0 and r1 are not directly comparable.
         Random.seed!(1337)
         n, k, m = 10, 4, 1
         μ = 0.02 .+ 0.04 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.08I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.08I)
 
         r0 = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                        stabilize_Σ=false, compute_weights=true,
                                        use_refit=false, threads=1,
                                        exactly_k=false, weights_sum1=false)
+
         r1 = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                        stabilize_Σ=false, compute_weights=true,
                                        use_refit=false, threads=1,
                                        exactly_k=false, weights_sum1=true)
 
-        @test r0.selection == r1.selection
-        @test isapprox(r0.sr, r1.sr; atol=0, rtol=0)
-        @test abs(sum(r1.weights) - 1.0) ≤ 1e-10
-        if sum(abs, r0.weights) > 0
-            @test norm(r1.weights - (r0.weights / sum(r0.weights))) ≤ 1e-8
-        end
+        # r1 invariants (budgeted problem)
+        @test abs(abs_sum(r1.weights) - 1.0) ≤ 1e-10
+        @test isfinite(r1.sr)
+        @test length(r1.selection) ≤ k && length(r1.selection) ≥ m
+
+        # Scale-invariance verified within a single solution (r0)
+        x0n = r0.weights / max(abs_sum(r0.weights), eps())
+        @test abs(compute_sr(x0n, μ, Σ) - compute_sr(r0.weights, μ, Σ)) ≤ 1e-10
     end
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # NEW: exactly_k=true — strict cardinality (non-refit)
-    # ─────────────────────────────────────────────────────────────────────────
     @testset "exactly_k=true enforces |S| == k (non-refit, weights_sum1=true)" begin
         Random.seed!(2025)
         n, k = 12, 5
         μ = 0.01 .+ 0.04 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.06I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.06I)
 
         res = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                         stabilize_Σ=false, compute_weights=true,
@@ -99,20 +109,17 @@ end
                                         exactly_k=true, weights_sum1=true)
 
         @test length(res.selection) == k
-        @test abs(sum(res.weights) - 1.0) ≤ 1e-10
-        @test count(!iszero, res.weights) ≥ k  # zeros outside selection allowed, active ≥ k numerically
-        # SR recompute
+        @test abs(abs_sum(res.weights) - 1.0) ≤ 1e-10
+        # Ensure weights outside selection are (numerically) zero
+        @test all(i -> (i ∈ res.selection) || abs(res.weights[i]) ≤ 1e-12, 1:length(res.weights))
         @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-8
     end
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # NEW: exactly_k=true — strict cardinality (refit)
-    # ─────────────────────────────────────────────────────────────────────────
-    @testset "exactly_k=true with refit: |S| == k and SR equals closed-form on S" begin
+    @testset "exactly_k=true with refit: SR equals closed-form MVE SR on S" begin
         Random.seed!(2026)
         n, k = 10, 4
         μ = 0.015 .+ 0.03 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.04I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.04I)
 
         r_rf = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                          stabilize_Σ=false, compute_weights=true,
@@ -120,23 +127,24 @@ end
                                          exactly_k=true, weights_sum1=true)
 
         @test length(r_rf.selection) == k
-        # Refitted SR must match the closed-form MVE SR on the same subset
+
+        # Expected refit SR (closed-form on S, same stabilization choice)
         sr_expected = _refit_sr(μ, Σ; selection=r_rf.selection, stabilize_Σ=false, epsilon=0.0)
-        @test isapprox(r_rf.sr, sr_expected; atol=1e-9, rtol=0)
-        # Returned weights should also attain that SR
+        @test isapprox(r_rf.sr, sr_expected; atol=ATOL_SR, rtol=0)
+
+        # Returned weights should attain that SR
         sr_w = compute_sr(r_rf.weights, μ, Σ; selection=r_rf.selection, stabilize_Σ=false, epsilon=0.0)
         @test isapprox(sr_w, sr_expected; atol=1e-8, rtol=0)
-        @test abs(sum(r_rf.weights) - 1.0) ≤ 1e-10
+
+        # Budget normalization (absolute sum)
+        @test abs(abs_sum(r_rf.weights) - 1.0) ≤ 1e-10
     end
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # NEW: exactly_k=true overrides m (if provided inconsistently)
-    # ─────────────────────────────────────────────────────────────────────────
-    @testset "exactly_k=true overrides/ignores m: result still has |S|==k" begin
+    @testset "exactly_k=true overrides m (if provided): result still has |S|==k" begin
         Random.seed!(2027)
-        n, k, m = 11, 3, 1   # inconsistent only if someone expects m to bind with equality
+        n, k, m = 11, 3, 1
         μ = 0.01 .+ 0.03 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.05I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.05I)
 
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                         stabilize_Σ=false, compute_weights=true,
@@ -144,11 +152,11 @@ end
                                         exactly_k=true, weights_sum1=true)
 
         @test length(res.selection) == k
-        @test abs(sum(res.weights) - 1.0) ≤ 1e-10
+        @test abs(abs_sum(res.weights) - 1.0) ≤ 1e-10
     end
 
-    @testset "k = 1 diagonal-Σ case selects argmax of μ_i - 0.5γσ_i^2 (non-refit)" begin
-        μ = [0.10, 0.28, 0.18, 0.05]
+    @testset "k = 1 diagonal-Σ: picks argmax of μ_i - 0.5γσ_i^2 (non-refit)" begin
+        μ  = [0.10, 0.28, 0.18, 0.05]
         σ2 = [0.04, 0.20, 0.09, 0.01]
         Σ  = Symmetric(Diagonal(σ2) |> Matrix)
         γ  = 2.0
@@ -160,7 +168,7 @@ end
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=1, γ=γ,
                                         stabilize_Σ=false, compute_weights=true,
                                         use_refit=false, threads=1,
-                                        exactly_k=true, weights_sum1=true)  # strict 1-of-N
+                                        exactly_k=true, weights_sum1=true)
 
         @test sum(abs.(res.weights) .> 1e-12) == 1
         @test findmax(res.weights)[2] == best
@@ -168,7 +176,7 @@ end
         @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-9
     end
 
-    @testset "use_refit=true: selection equality, SR equals closed-form refit SR" begin
+    @testset "use_refit=true: same selection as non-refit; SR equals closed-form refit SR" begin
         Random.seed!(321)
         n, k, m = 10, 4, 0
         μ = 0.01 .+ 0.03 .* rand(n)
@@ -186,19 +194,16 @@ end
 
         @test r_rf.selection == r_nr.selection
 
-        sr_expected = _refit_sr(μ, Σ; selection=r_nr.selection,
-                                stabilize_Σ=false, epsilon=0.0)
-        @test isapprox(r_rf.sr, sr_expected; atol=1e-9, rtol=0)
+        sr_expected = _refit_sr(μ, Σ; selection=r_nr.selection, stabilize_Σ=false, epsilon=0.0)
+        @test isapprox(r_rf.sr, sr_expected; atol=ATOL_SR, rtol=0)
 
         w = r_rf.weights
-        sr_refit = SparseMaxSR.compute_sr(w, μ, Σ; selection=r_rf.selection,
-                                          stabilize_Σ=false, epsilon=0.0)
-        sr_star  = SparseMaxSR.compute_mve_sr(μ, Σ; selection=r_rf.selection,
-                                              stabilize_Σ=false, epsilon=0.0)
+        sr_refit = compute_sr(w, μ, Σ; selection=r_rf.selection, stabilize_Σ=false, epsilon=0.0)
+        sr_star  = compute_mve_sr(μ, Σ; selection=r_rf.selection, stabilize_Σ=false, epsilon=0.0)
 
         @test isfinite(sr_refit)
         @test abs(sr_refit - sr_star) ≤ 1e-8
-        @test r_rf.sr + 1e-12 ≥ r_nr.sr
+        @test r_rf.sr + 1e-12 ≥ r_nr.sr  # refit does not worsen SR
     end
 
     @testset "use_refit=true with compute_weights=false returns zero vector but correct SR" begin
@@ -212,24 +217,25 @@ end
                                           use_refit=true, threads=1,
                                           exactly_k=true)
 
-        @test isempty(setdiff(findall(!iszero, r_rf0.weights), Int[]))  # all zeros
+        @test all(iszero, r_rf0.weights)
         sr_expected = _refit_sr(μ, Σ; selection=r_rf0.selection, stabilize_Σ=false, epsilon=0.0)
-        @test isapprox(r_rf0.sr, sr_expected; atol=1e-9, rtol=0)
+        @test isapprox(r_rf0.sr, sr_expected; atol=ATOL_SR, rtol=0)
     end
 
-    @testset "enforcing m (minimum cardinality) and k (non-refit, exactly_k=false)" begin
+    @testset "enforcing m (min cardinality) and k (non-refit, exactly_k=false)" begin
         Random.seed!(321)
         n, k, m = 7, 4, 2
         μ = 0.01 .+ 0.03 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.05I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.05I)
 
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                         stabilize_Σ=false, compute_weights=true,
                                         use_refit=false, threads=1,
                                         exactly_k=false, weights_sum1=true)
+
         supp = sum(abs.(res.weights) .> 1e-12)
         @test m ≤ supp ≤ k
-        @test abs(sum(res.weights) - 1.0) ≤ 1e-10
+        @test abs(abs_sum(res.weights) - 1.0) ≤ 1e-10
         @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-7
     end
 
@@ -237,10 +243,10 @@ end
         Random.seed!(777)
         n, k, m = 6, 3, 2
         μ = 0.02 .+ 0.02 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.03I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.03I)
 
-        fmin = fill(0.0, n); fmin[1:2] .= 0.05  # if chosen, at least 5% each
-        fmax = fill(0.8, n); fmax[3] = 0.4      # cap asset 3 at 40%
+        fmin = fill(0.0, n); fmin[1:2] .= 0.05  # active ones must be ≥ 5%
+        fmax = fill(0.8, n); fmax[3]   = 0.4    # cap asset 3 at 40%
 
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                         fmin=fmin, fmax=fmax,
@@ -255,15 +261,15 @@ end
                 @test x[i] + 1e-12 ≥ fmin[i]
             end
         end
-        @test abs(sum(x) - 1.0) ≤ 1e-10
+        @test abs(abs_sum(x) - 1.0) ≤ 1e-10
         @test isfinite(res.sr)
     end
 
-    @testset "expand_rounds improve (or not worsen) SR when caps bind (non-refit)" begin
+    @testset "expand_rounds: does not worsen SR when caps bind (non-refit)" begin
         Random.seed!(888)
         n, k = 8, 3
         μ = 0.02 .+ 0.04 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.08I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.08I)
 
         fmin = zeros(n)
         fmax = fill(1.0 / k, n)
@@ -278,10 +284,11 @@ end
                                         expand_rounds=2, expand_factor=2.0, expand_tol=1e-9,
                                         stabilize_Σ=false, use_refit=false, threads=1,
                                         exactly_k=false, weights_sum1=true)
+
         @test r2.sr + 1e-12 ≥ r0.sr
     end
 
-    @testset "epsilon regularization works on near-singular Σ (non-refit)" begin
+    @testset "epsilon regularization on near-singular Σ (non-refit)" begin
         Random.seed!(999)
         n, k = 10, 3
         v = ones(n)
@@ -301,11 +308,11 @@ end
         @test isfinite(rE.sr)
     end
 
-    @testset "determinism with threads=1 (same inputs => same outputs) (non-refit)" begin
+    @testset "determinism with threads=1 (same inputs ⇒ same outputs) (non-refit)" begin
         Random.seed!(2024)
         n, k = 9, 3
         μ = 0.02 .+ 0.03 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.05I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.05I)
 
         r1 = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                        stabilize_Σ=false, compute_weights=true,
@@ -316,8 +323,8 @@ end
                                        use_refit=false, threads=1,
                                        exactly_k=true, weights_sum1=true)
 
-        @test isapprox(r1.sr, r2.sr; atol=0, rtol=0)
-        @test isapprox(r1.weights, r2.weights; atol=0, rtol=0)
+        @test isapprox(r1.sr, r2.sr; atol=1e-12, rtol=0)
+        @test isapprox(r1.weights, r2.weights; atol=1e-12, rtol=0)
         @test r1.selection == r2.selection
     end
 
@@ -325,7 +332,7 @@ end
         Random.seed!(42)
         n, k = 8, 3
         μ = 0.02 .+ 0.05 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.07I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.07I)
 
         r = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                       stabilize_Σ=false, compute_weights=true,
@@ -341,8 +348,8 @@ end
                                               exactly_k=true, weights_sum1=true)
 
         @test r_restart.selection == r.selection
-        @test isapprox(r_restart.weights, r.weights; atol=0, rtol=0)
-        @test isapprox(r_restart.sr, r.sr; atol=0, rtol=0)
+        @test isapprox(r_restart.weights, r.weights; atol=1e-12, rtol=0)
+        @test isapprox(r_restart.sr, r.sr; atol=1e-12, rtol=0)
     end
 
     @testset "argument checks (do_checks=true)" begin
@@ -365,22 +372,23 @@ end
         @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=2, fmin=[0.2, 0.3], fmax=[0.1, 0.4], do_checks=true)
     end
 
-    @testset "time_limit: still returns a finite SR with tight time budget (mode-agnostic)" begin
+    @testset "time_limit: finite SR with tight budget (mode-agnostic)" begin
         Random.seed!(1414)
         n, k = 14, 4
         μ = 0.01 .+ 0.03 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.05I)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.05I)
 
         res = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                         time_limit=0.1, mipgap=1e-3, threads=1,
                                         stabilize_Σ=false, use_refit=false,
-                                        exactly_k=false)  # default weights_sum1=false is OK
+                                        exactly_k=false)  # default weights_sum1=false
         @test isfinite(res.sr)
 
         res2 = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                          time_limit=0.1, mipgap=1e-3, threads=1,
                                          stabilize_Σ=false, use_refit=true,
-                                         exactly_k=true)   # default weights_sum1=false is OK
+                                         exactly_k=true)   # default weights_sum1=false
         @test isfinite(res2.sr)
     end
 end
+

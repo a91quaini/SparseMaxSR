@@ -4,7 +4,7 @@ using LinearAlgebra, Statistics
 using GLMNet
 
 import ..SharpeRatio: compute_mve_sr, compute_mve_weights, compute_sr
-import ..Utils: EPS_RIDGE, _prep_S
+import ..Utils: EPS_RIDGE, _prep_S, make_weights_sum1
 
 export mve_lasso_relaxation_search
 
@@ -101,16 +101,17 @@ end
         return w, true
     end
     if weights_sum1
-        s = sum(b)
-        if !isfinite(s) || abs(s) < tol
-            return w, true  # cannot safely normalize to sum=1
+        b_norm, status_norm, _ = make_weights_sum1(b; mode=:abs, tol=tol)
+        if status_norm == :ZERO_SUM
+            return w, true  # ALLEMPTY: coefficients cancel out, no safe normalization
         end
-        @inbounds w[sel] .= b ./ s
+        @inbounds w[sel] .= b_norm
         return w, false
     else
         @inbounds w[sel] .= b
         return w, false
     end
+
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -137,7 +138,7 @@ end
 Path-based elastic net on returns: regress `y` on `R` with no intercept and take the
 largest support `s ≤ k` from the λ-path. If `use_refit=true`, refit exact MVE on this
 support; otherwise return the vanilla LASSO weights:
-- if `weights_sum1=true`, scale coefficients to make `sum(w)=1` (with 1e-7 safeguard);
+- if `weights_sum1=true`, scale coefficients to make `|sum(w)|=1` (with 1e-7 safeguard);
 - if `weights_sum1=false`, use raw coefficients on the selected support.
 
 By default, `y = ones(T)`.
@@ -215,7 +216,7 @@ end
 Moment-only variant. Build synthetic design with
 Q = T(Σₛ + μμᵀ), take U from a safe Cholesky of Q, set X = Uᵀ and y = U \\ (Tμ),
 then delegate to the shared path selector. In the vanilla branch, weights are either
-raw coefficients (if `weights_sum1=false`) or normalized to `sum(w)=1` (if `true`).
+raw coefficients (if `weights_sum1=false`) or normalized to `|sum(w)|=1` (if `true`).
 """
 function mve_lasso_relaxation_search(
     μ::AbstractVector{<:Real},

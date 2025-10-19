@@ -1,38 +1,37 @@
 #!/usr/bin/env julia
 # Extended example: compare Exhaustive, LASSO (vanilla/refit), and MIQP (vanilla/refit)
-# - Experiment A:  T=500, N=30,   k ∈ {1,3,5,7,9}       (Exhaustive + LASSO + MIQP)
-# - Experiment B:  T=500, N=100,  k ∈ {1,5,10,15,20,…}  (LASSO + MIQP)
-# - Experiment C:  T=1250, N=500, k ∈ {100, 500}        (LASSO + MIQP)
-# - Experiment D:  T=500,  N=1000, k ∈ {500}            (LASSO + MIQP)
+# - Experiment A:  T=500,  N=30,   k ∈ {1,3,5,7,9}         (Exhaustive + LASSO + MIQP)
+# - Experiment B:  T=500,  N=100,  k ∈ {1,5,10,15,20,…}    (LASSO + MIQP)
+# - Experiment C:  T=1250, N=500,  k ∈ {100, 500}          (LASSO + MIQP)
+# - Experiment D:  T=500,  N=1000, k ∈ {500}               (LASSO + MIQP)
 #
-# Run:  julia --project=. example1.jl
+# Run:  julia --project=. example.jl
 #
 # Notes:
 # * Exhaustive search is skipped automatically when C(N,k) exceeds a cap.
 # * Cells show "SR / time_s", where SR is the Sharpe ratio and time_s is seconds.
-# * LASSO-VANILLA is the normalize-coeffs branch (abs(sum(w))=1 if possible; else :LASSO_ALLEMPTY).
+# * LASSO-VANILLA is the normalize-coeffs branch (may return :LASSO_ALLEMPTY).
 # * LASSO-REFIT refits exact MVE on the selected support.
-# * MIQP-VANILLA reports the MIQP solution as returned by the heuristic.
-# * MIQP-REFIT refits exact MVE on the MIQP-selected support (if the routine supports it).
-
+# * MIQP uses a cardinality band m=k-1..k, with no budget constraint (weights_sum1=false),
+#   and MATLAB-like defaults: time_limit=200, expand_rounds=20, expand_factor=3.0, expand_tol=1e-2.
+#
 using SparseMaxSR
 using Random, LinearAlgebra, Statistics, Printf, Dates
 using Combinatorics: binomial
-import MathOptInterface as MOI  # for checking MIQP optimality symbol
+import MathOptInterface as MOI
 
 # -----------------------
 # Helpers
 # -----------------------
 
-timestamp() = Dates.format(now(), dateformat"yyyy-mm-dd HH:MM:SS")
+timestamp() = Dates.format(now(), "yyyy-mm-dd HH:MM:SS")
 
 # Simulate returns with a mild 2-factor structure + noise
 function simulate_returns(T::Int, N::Int; nf::Int=2, beta_scale=0.3, eps_scale=0.7, rng = Random.default_rng())
     F = randn(rng, T, nf)
     B = beta_scale .* randn(rng, N, nf)
     E = eps_scale  .* randn(rng, T, N)
-    R = F * B' .+ E
-    return R
+    return F * B' .+ E
 end
 
 # Moments from returns
@@ -57,33 +56,61 @@ function run_exhaustive(μ, Σ, k)
     return sel, w, sr, tsec, st
 end
 
-# MIQP heuristic — VANILLA (no refit), returns what the MIQP heuristic solved
+# MIQP heuristic — VANILLA (no refit)
+# Spec: use band m=k-1..k, weights_sum1=false, MATLAB-like defaults.
 function run_miqp_vanilla(μ, Σ, k)
     sel = w = nothing; sr = NaN; st = :UNKNOWN
-    δ = 1e-3 / k
-    fmin = fill(δ, length(μ))
-    fmax = ones(length(μ))
     tsec = @elapsed begin
         sel, w, sr, st = SparseMaxSR.mve_miqp_heuristic_search(
-            μ, Σ; k = k,
-            exactly_k = true,
-            fmin = fmin,
-            fmax = fmax,
-            compute_weights=true,
-            use_refit=false
+            μ, Σ;
+            # cardinality band
+            k = k,
+            m = max(0, k-1),
+            exactly_k = false,
+            # bounds (optional; keep wide-open defaults)
+            # fmin = zeros(length(μ)),
+            # fmax = ones(length(μ)),
+            # matlab-like controls
+            expand_rounds = 20,
+            expand_factor = 3.0,
+            expand_tol    = 1e-2,
+            mipgap        = 1e-4,   # keep modest tolerance
+            time_limit    = 200.0,
+            threads       = 1,
+            # stabilization & ridge
+            epsilon       = SparseMaxSR.EPS_RIDGE,
+            stabilize_Σ   = true,
+            # per-spec
+            weights_sum1  = false,
+            compute_weights = true,
+            use_refit     = false,
+            do_checks     = false
         )
     end
     return sel, w, sr, tsec, st
 end
 
-# MIQP heuristic — REFIT (refit exact MVE on MIQP support)
+# MIQP heuristic — REFIT (refit exact MVE on MIQP-selected support)
 function run_miqp_refit(μ, Σ, k)
     sel = w = nothing; sr = NaN; st = :UNKNOWN
     tsec = @elapsed begin
         sel, w, sr, st = SparseMaxSR.mve_miqp_heuristic_search(
-            μ, Σ; k=k,
-            compute_weights=true,
-            use_refit=true
+            μ, Σ;
+            k = k,
+            m = max(0, k-1),
+            exactly_k = false,
+            expand_rounds = 20,
+            expand_factor = 3.0,
+            expand_tol    = 1e-2,
+            mipgap        = 1e-4,
+            time_limit    = 200.0,
+            threads       = 1,
+            epsilon       = SparseMaxSR.EPS_RIDGE,
+            stabilize_Σ   = true,
+            weights_sum1  = false,
+            compute_weights = true,
+            use_refit     = true,
+            do_checks     = false
         )
     end
     return sel, w, sr, tsec, st
@@ -95,17 +122,17 @@ function run_lasso_vanilla(R, μ, Σ, k; alpha=0.95)
     tsec = @elapsed begin
         sel, w, sr, st = SparseMaxSR.mve_lasso_relaxation_search(
             μ, Σ, size(R,1);
-            # the following kwargs reflect the "path then pick" design; keep tuned as per your current API
             k = k,
             nlambda = 100,
-            lambda_min_ratio = 1e-5,
+            lambda_min_ratio = 1e-3,
             alpha = alpha,
             standardize = false,
-            epsilon = SparseMaxSR.EPS_RIDGE[],   # dereference Ref
+            epsilon = SparseMaxSR.EPS_RIDGE,
             stabilize_Σ = true,
             compute_weights = true,     # ignored in vanilla branch; harmless
             use_refit = false,          # vanilla = normalized β
-            do_checks = false
+            do_checks = false,
+            weights_sum1 = false
         )
     end
     return sel, w, sr, tsec, st
@@ -119,14 +146,15 @@ function run_lasso_refit(R, μ, Σ, k; alpha=0.95)
             μ, Σ, size(R,1);
             k = k,
             nlambda = 100,
-            lambda_min_ratio = 1e-5,
+            lambda_min_ratio = 1e-3,
             alpha = alpha,
             standardize = false,
-            epsilon = SparseMaxSR.EPS_RIDGE[],   # dereference Ref
+            epsilon = SparseMaxSR.EPS_RIDGE,
             stabilize_Σ = true,
             compute_weights = true,     # request refit weights
             use_refit = true,           # refit MVE on support
-            do_checks = false
+            do_checks = false,
+            weights_sum1 = false
         )
     end
     return sel, w, sr, tsec, st
@@ -180,7 +208,7 @@ EXH_CAP = 3_000_000
 
 for k in ks
     # Exhaustive (guarded)
-    if binomial(N,k) <= EXH_CAP
+    if binomial(N,k) ≤ EXH_CAP
         try
             _, _, sr, t, _ = run_exhaustive(μ, Σ, k)
             cells[(k,"EXHAUSTIVE")] = cell(sr, t)
@@ -236,7 +264,6 @@ for k in ks
     catch
         cells[(k,"MIQP-REFIT")] = "ERR"
     end
-
 end
 
 print_table("Results — Experiment A (T=500, N=30)", ks, methods, cells)
@@ -315,10 +342,10 @@ println("LASSO-VANILLA: ALLEMPTY for k ∈ {" * _fmt_ks(lasso_empty_B) * "}")
 println("MIQP: solver not OPTIMAL for k ∈ {" * _fmt_ks(miqp_notopt_B) * "}")
 
 # =============================================================================
-# Experiment C: T=250*5 (=1250), N=500, k in {100, 500}
+# Experiment C: T=1250, N=500, k in {100, 500}
 # =============================================================================
 Random.seed!(2025)
-T, N = 250*5, 500
+T, N = 1250, 500
 ks = [100, 500]
 methods = ["LASSO-VANILLA", "LASSO-REFIT", "MIQP-VANILLA", "MIQP-REFIT"]
 cells = Dict{Tuple{Int,String},String}()
@@ -385,10 +412,10 @@ println("LASSO-VANILLA: ALLEMPTY for k ∈ {" * _fmt_ks(lasso_empty_C) * "}")
 println("MIQP: solver not OPTIMAL for k ∈ {" * _fmt_ks(miqp_notopt_C) * "}")
 
 # =============================================================================
-# Experiment D: T=250*2 (=500), N=1000, k in {500}
+# Experiment D: T=500, N=1000, k in {500}
 # =============================================================================
 Random.seed!(2025)
-T, N = 250*2, 1000
+T, N = 500, 1000
 ks = [500]
 methods = ["LASSO-VANILLA", "LASSO-REFIT", "MIQP-VANILLA", "MIQP-REFIT"]
 cells = Dict{Tuple{Int,String},String}()

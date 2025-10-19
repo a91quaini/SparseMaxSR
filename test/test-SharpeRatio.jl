@@ -154,7 +154,6 @@ const TOL = 1e-7  # slightly relaxed to avoid spurious failures across BLAS/solv
         @test abs(s1 - s2) ≤ 1e-8
     end
 
-    # --- NEW: weights_sum1 semantics ------------------------------------------
     @testset "weights_sum1 semantics" begin
         Random.seed!(4)
         n = 8
@@ -162,26 +161,26 @@ const TOL = 1e-7  # slightly relaxed to avoid spurious failures across BLAS/solv
         A = randn(n, n)
         Σ = Symmetric(A*A' + 0.15I)
 
-        # full-universe weights: normalized vs unnormalized
         w0 = compute_mve_weights(μ, Σ; weights_sum1=false)
         w1 = compute_mve_weights(μ, Σ; weights_sum1=true)
-        @test abs(sum(w1) - 1.0) ≤ 1e-10          # sums to one
-        # proportionality (guard against tiny denominator by requiring non-pathological μ)
-        @test norm(w1 - (w0 / sum(w0))) ≤ 1e-8
-        # SR is scale-invariant
-        sr0 = compute_sr(w0, μ, Σ)
-        sr1 = compute_sr(w1, μ, Σ)
-        @test abs(sr0 - sr1) ≤ 1e-10
 
-        # selection case: zeros off support and sum to one when requested
+        # The implementation normalizes with mode=:abs → |sum(w)| = 1
+        @test abs(abs(sum(w1)) - 1.0) ≤ 1e-10
+        @test norm(w1 - (w0 / max(abs(sum(w0)), eps()))) ≤ 1e-8
+
+        # SR is scale-invariant
+        @test abs(compute_sr(w0, μ, Σ) - compute_sr(w1, μ, Σ)) ≤ 1e-10
+
+        # selection case: zeros off support and abs-sum normalization
         sel = sort(randperm(n)[1:5])
         ws = compute_mve_weights(μ, Σ; selection=sel, weights_sum1=true)
         @test all(i -> (i ∈ sel) || (ws[i] == 0.0), 1:n)
-        @test abs(sum(ws) - 1.0) ≤ 1e-10
-        # SR unaffected by normalization on selected subset
+        @test abs(abs(sum(ws)) - 1.0) ≤ 1e-10
+
         w_raw = compute_mve_weights(μ, Σ; selection=sel, weights_sum1=false)
         @test abs(compute_sr(ws, μ, Σ) - compute_sr(w_raw, μ, Σ)) ≤ 1e-10
     end
+
 
     # --- error paths when do_checks=true --------------------------------------
     @testset "argument checks" begin

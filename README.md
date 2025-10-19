@@ -43,29 +43,7 @@ Core (direct):
 - `Combinatorics` (for combinations)
 - `JuMP` and `MathOptInterface` (MIQP heuristic)
 - `GLMNet` (LASSO path; used in relaxation search)
-
-Suggested / optional:
-
-- One or more conic/MIP solvers for MIQP:
-  `HiGHS`, `CPLEX`, `MosekTools`, `Gurobi`, `SCS`, `Clarabel`, `COSMO`, …
-
----
-
-## Key Semantics (updated)
-
-### Budget / normalization via `weights_sum1::Bool`
-
-- **New:** Many entry points accept `weights_sum1::Bool=false`.
-  - When `true`, returned weights are rescaled so that **∑w = 1** (or **|∑w|=1** if the routine uses absolute normalization internally).  
-    Sharpe ratio is **scale‑invariant**, so SR **does not change** under this rescaling.
-  - When `false`, **no budget constraint is imposed** by the routine; weights may not sum to 1.
-- `compute_mve_weights` also supports `weights_sum1`; the vector is zero outside `selection` and is normalized only when requested.
-
-### Cardinality controls
-
-- `k` is the **upper bound** on support size unless an algorithm exposes `exactly_k=true` (then `|S|=k` is enforced).
-- For MIQP, a **lower bound** `m` can be provided (default behavior may set it relative to `k` in your workflow);
-  when `exactly_k=true`, the equality **takes precedence** over `m`.
+- `CPLEX` (MIQP heuristic)
 
 ---
 
@@ -99,7 +77,7 @@ compute_mve_weights(μ::AbstractVector, Σ::AbstractMatrix;
                     weights_sum1::Bool=false, do_checks::Bool=false) -> Vector{Float64}
 ```
 Return the corresponding **MVE weights** on `selection` (full‑length vector with zeros outside the support).
-If `weights_sum1=true`, the result is rescaled to satisfy `∑w=1` (when feasible).
+If `weights_sum1=true`, the result is rescaled to satisfy `|∑w|=1` (when feasible).
 
 ---
 
@@ -127,7 +105,7 @@ Searches supports to maximize the **MVE Sharpe ratio**:
 - If `max_samples_per_k > 0`, it samples up to that many supports per size (also bounded by the number of available combinations).
 - `exactly_k=true` restricts to size `k`; set `false` to search all sizes in `1:k`.
 - If `compute_weights=true`, the routine returns MVE weights on the winning support; set `weights_sum1=true`
-  to normalize them to budget **(∑w=1)**.
+  to normalize them to budget **(|∑w|=1)**.
 
 ---
 
@@ -153,7 +131,7 @@ mve_lasso_relaxation_search(μ::AbstractVector, Σ::AbstractMatrix, T::Integer;
   - Otherwise: `status = :LASSO_PATH_ALMOST_K`.
   - If no variables are ever selected: `status = :LASSO_ALLEMPTY`.
 - **Vanilla (use_refit=false)**: **normalize the path coefficients into portfolio weights**;
-  set `weights_sum1=true` to enforce `∑w=1` (when feasible). If the selected coefficients sum ≈ 0,
+  set `weights_sum1=true` to enforce `|∑w|=1` (when feasible). If the selected coefficients sum ≈ 0,
   the routine returns `w=0`, `sr=0`, `status=:LASSO_ALLEMPTY`.
 - **Refit (use_refit=true)**: compute **exact MVE weights on the selected support**; set `weights_sum1=true`
   to rescale the refit weights to `∑w=1`. SR is invariant to this rescaling.
@@ -181,7 +159,7 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
     exactly_k::Bool=false,
     compute_weights::Bool=true,
     use_refit::Bool=false,
-    weights_sum1::Bool=false,         # NEW: no budget by default
+    weights_sum1::Bool=false,
     epsilon::Real=EPS_RIDGE,
     stabilize_Σ::Bool=true,
     do_checks::Bool=false,
@@ -192,7 +170,7 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
 ```
 - A JuMP/MathOptInterface‑based heuristic for the cardinality‑constrained MVE problem.
 - **Budget:** *not enforced by default* (`weights_sum1=false`). Set `weights_sum1=true`
-  to rescale final weights to `∑w=1` (SR invariant).
+  to rescale final weights to `|∑w|=1` (SR invariant).
 - **Cardinality:** use `exactly_k=true` to enforce `|S|=k`. Otherwise, the algorithm respects the bounds `m ≤ |S| ≤ k`.
   If both are provided and inconsistent with equality, `exactly_k=true` takes precedence.
 - **Refit:** `use_refit=true` recomputes **closed‑form MVE weights** and SR on the found support.

@@ -154,13 +154,13 @@ Compute **mean–variance efficient (MVE) portfolio weights**:
 
     w = Σ^{-1} μ
 
-If `weights_sum1=true`, the weights are renormalized so that `sum(w) = 1`.
+If `weights_sum1=true`, the weights are renormalized so that `|sum(w)| = 1`.
 
 # Arguments
 - `μ`: mean vector of excess returns (length n).
 - `Σ`: covariance matrix (n×n).
 - `selection`: optional subset of indices; other positions are set to zero.
-- `weights_sum1`: if true, normalize weights to sum to one.
+- `weights_sum1`: if true, normalize weights to make `|sum(w)|=1`.
 - `epsilon`: ridge stabilization parameter for Σ.
 - `stabilize_Σ`: symmetrize and ridge-stabilize Σ before inversion.
 - `do_checks`: input validation (dimensions, finiteness, etc.).
@@ -204,7 +204,7 @@ function compute_mve_weights(
     # Optional normalization to make weights sum to 1
     if weights_sum1
         # Classic budget: sum(w) = 1
-        w, _, _ = Utils.make_weights_sum1(w; mode=:sum)
+        w, _, _ = make_weights_sum1(w; mode=:abs)
     end
 
     return w

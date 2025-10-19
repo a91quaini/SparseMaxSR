@@ -81,15 +81,18 @@ function _glmnet_path_select(
     return (best_idx, jstar, βj, status, βmat)
 end
 
-# Build normalized-β weights (full length) with |sum(w)| = 1 if possible.
-# Returns (w, is_all_empty::Bool) where "all empty" means we cannot enforce |sum|=1.
-@inline function _normalized_lasso_weights(
+# Build LASSO-vanilla weights on full length.
+# If weights_sum1=true: normalize so sum(w)=1 with 1e-7 safeguard.
+# If weights_sum1=false: return raw coefficients on the selected support.
+# Returns (w, is_all_empty::Bool) when normalization cannot be done.
+@inline function _lasso_weights_from_beta!(
+    w::Vector{Float64},
     βj::AbstractVector{<:Real},
-    sel::AbstractVector{<:Integer},
-    N::Int;
-    tol::Real = 1e-12
+    sel::AbstractVector{<:Integer};
+    weights_sum1::Bool,
+    tol::Real = 1e-7
 )
-    w = zeros(Float64, N)
+    fill!(w, 0.0)
     if isempty(sel)
         return w, true
     end
@@ -97,14 +100,17 @@ end
     if all(iszero, b)
         return w, true
     end
-    s_signed = sum(b)
-    if !isfinite(s_signed) || abs(s_signed) < tol
-        # Cannot scale to enforce |sum(w)|=1 (sum is ~0): declare ALLEMPTY
-        return w, true
+    if weights_sum1
+        s = sum(b)
+        if !isfinite(s) || abs(s) < tol
+            return w, true  # cannot safely normalize to sum=1
+        end
+        @inbounds w[sel] .= b ./ s
+        return w, false
+    else
+        @inbounds w[sel] .= b
+        return w, false
     end
-    # Scale so that abs(sum(w)) = 1  (indeed sum(w) = sign(signed)*1)
-    @inbounds w[sel] .= b ./ abs(s_signed)
-    return w, false
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -123,15 +129,16 @@ end
         epsilon::Real = EPS_RIDGE,
         stabilize_Σ::Bool = true,
         compute_weights::Bool = false,
+        weights_sum1::Bool = false,
         use_refit::Bool = true,
         do_checks::Bool = false
     ) -> NamedTuple{(:selection, :weights, :sr, :status)}
 
 Path-based elastic net on returns: regress `y` on `R` with no intercept and take the
 largest support `s ≤ k` from the λ-path. If `use_refit=true`, refit exact MVE on this
-support; otherwise normalize the LASSO coefficients and scale so that `abs(sum(w))=1`.
-If the selected coefficients sum to ~0 (cannot scale), the method returns all-zero
-weights and `status = :LASSO_ALLEMPTY`.
+support; otherwise return the vanilla LASSO weights:
+- if `weights_sum1=true`, scale coefficients to make `sum(w)=1` (with 1e-7 safeguard);
+- if `weights_sum1=false`, use raw coefficients on the selected support.
 
 By default, `y = ones(T)`.
 """
@@ -147,6 +154,7 @@ function mve_lasso_relaxation_search(
     epsilon::Real = EPS_RIDGE,
     stabilize_Σ::Bool = true,
     compute_weights::Bool = false,
+    weights_sum1::Bool = false,
     use_refit::Bool = true,
     do_checks::Bool = false
 )
@@ -164,10 +172,10 @@ function mve_lasso_relaxation_search(
 
     # quick exit if no support found (keep path status)
     if isempty(best_idx)
-        return (selection = best_idx, 
-                weights = zeros(Float64, N), 
-                sr = 0.0, 
-                status = use_refit ? path_status : :LASSO_ALLEMPTY)
+        return (selection = best_idx,
+                weights   = zeros(Float64, N),
+                sr        = 0.0,
+                status    = use_refit ? path_status : :LASSO_ALLEMPTY)
     end
 
     # moments & stabilized Σ (once)
@@ -176,26 +184,28 @@ function mve_lasso_relaxation_search(
     Σs = _prep_S(Σ, epsilon, stabilize_Σ)
 
     if use_refit
-        # Refit branch: weights depend on compute_weights flag (can legally be all zeros)
+        # Refit branch: SR independent of scaling; weights (if requested) inherit weights_sum1
         sr = compute_mve_sr(μ, Σs; selection=best_idx,
                             epsilon=epsilon, stabilize_Σ=false, do_checks=false)
         w  = compute_weights ?
              compute_mve_weights(μ, Σs; selection=best_idx,
+                                 weights_sum1=weights_sum1,
                                  epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
              zeros(Float64, N)
-        return (selection = sort(best_idx), 
-                weights = w, 
-                sr = sr, 
-                status = path_status)
+        return (selection = sort(best_idx),
+                weights   = w,
+                sr        = sr,
+                status    = path_status)
     else
-        # Normalize-coeffs branch with |sum(w)| = 1 if possible; else ALLEMPTY
-        w, all_empty = _normalized_lasso_weights(βj, best_idx, N)
+        # Vanilla LASSO weights: raw or normalized to sum=1 (guarded)
+        w = zeros(Float64, N)
+        w, all_empty = _lasso_weights_from_beta!(w, βj, best_idx; weights_sum1=weights_sum1)
         status_final = all_empty ? :LASSO_ALLEMPTY : path_status
         sr = all_empty ? 0.0 : compute_sr(w, μ, Σs; stabilize_Σ=false, do_checks=false)
-        return (selection = sort(best_idx), 
-                weights = w, 
-                sr = sr, 
-                status = status_final)
+        return (selection = sort(best_idx),
+                weights   = w,
+                sr        = sr,
+                status    = status_final)
     end
 end
 
@@ -204,8 +214,8 @@ end
 
 Moment-only variant. Build synthetic design with
 Q = T(Σₛ + μμᵀ), take U from a safe Cholesky of Q, set X = Uᵀ and y = U \\ (Tμ),
-then delegate to the shared path selector. In the normalize branch, weights are
-scaled so that `abs(sum(w))=1` where possible; otherwise `:LASSO_ALLEMPTY`.
+then delegate to the shared path selector. In the vanilla branch, weights are either
+raw coefficients (if `weights_sum1=false`) or normalized to `sum(w)=1` (if `true`).
 """
 function mve_lasso_relaxation_search(
     μ::AbstractVector{<:Real},
@@ -220,6 +230,7 @@ function mve_lasso_relaxation_search(
     epsilon::Real = EPS_RIDGE,
     stabilize_Σ::Bool = true,
     compute_weights::Bool = false,
+    weights_sum1::Bool = false,
     use_refit::Bool = true,
     do_checks::Bool = false
 )
@@ -244,10 +255,10 @@ function mve_lasso_relaxation_search(
     )
 
     if isempty(best_idx)
-        return (selection = best_idx, 
-                weights = zeros(Float64, N), 
-                sr = 0.0, 
-                status = use_refit ? path_status : :LASSO_ALLEMPTY)
+        return (selection = best_idx,
+                weights   = zeros(Float64, N),
+                sr        = 0.0,
+                status    = use_refit ? path_status : :LASSO_ALLEMPTY)
     end
 
     if use_refit
@@ -255,20 +266,22 @@ function mve_lasso_relaxation_search(
                             epsilon=epsilon, stabilize_Σ=false, do_checks=false)
         w  = compute_weights ?
              compute_mve_weights(μ, Σs; selection=best_idx,
+                                 weights_sum1=weights_sum1,
                                  epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
              zeros(Float64, N)
-        return (selection = sort(best_idx), 
-                weights = w, 
-                sr = sr, 
-                status = path_status)
+        return (selection = sort(best_idx),
+                weights   = w,
+                sr        = sr,
+                status    = path_status)
     else
-        w, all_empty = _normalized_lasso_weights(βj, best_idx, N)
+        w = zeros(Float64, N)
+        w, all_empty = _lasso_weights_from_beta!(w, βj, best_idx; weights_sum1=weights_sum1)
         status_final = all_empty ? :LASSO_ALLEMPTY : path_status
         sr = all_empty ? 0.0 : compute_sr(w, μ, Σs; stabilize_Σ=false, do_checks=false)
-        return (selection = sort(best_idx), 
-                weights = w, 
-                sr = sr, 
-                status = status_final)
+        return (selection = sort(best_idx),
+                weights   = w,
+                sr        = sr,
+                status    = status_final)
     end
 end
 

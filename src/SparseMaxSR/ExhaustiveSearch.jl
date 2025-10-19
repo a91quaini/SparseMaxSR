@@ -126,6 +126,7 @@ end
         γ=1.0,
         stabilize_Σ = true,
         compute_weights::Bool=false,
+        weights_sum1::Bool=false,
         do_checks=false,
     ) -> NamedTuple{(:selection, :weights, :sr, :status)}
 
@@ -139,6 +140,11 @@ cap is hit, it switches to sampling without replacement up to the cap.
 
 If `max_samples_per_k > 0`, the method samples up to `max_samples_per_k` supports
 for each size (also bounded above by the number of available combinations).
+
+If `compute_weights=true`, the returned weights are computed via
+`compute_mve_weights(...; selection=best_set, weights_sum1=weights_sum1)`.
+Note that the reported Sharpe ratio is scale-invariant and does not depend on
+`weights_sum1`.
 
 The returned `status` is `:EXHAUSTIVE` if all intended supports were fully
 enumerated, and `:EXHAUSTIVE_SAMPLED` if any size was truncated or sampled.
@@ -158,6 +164,7 @@ function mve_exhaustive_search(
     γ::Real = 1.0,
     stabilize_Σ::Bool = true,
     compute_weights::Bool=false,
+    weights_sum1::Bool=false,
     do_checks::Bool = false,
 )
     # --- input checks ---
@@ -261,7 +268,12 @@ function mve_exhaustive_search(
     # Compute weights for the best selection (full-length, zeros elsewhere)
     best_w = (isempty(best_set) || !compute_weights) ?
         zeros(Float64, n) :
-        compute_mve_weights(μ, Σs; selection=best_set, epsilon=epsilon, stabilize_Σ=false, do_checks=false)
+        compute_mve_weights(μ, Σs;
+            selection=best_set,
+            weights_sum1=weights_sum1,
+            epsilon=epsilon,
+            stabilize_Σ=false,
+            do_checks=false)
 
     return (selection = best_set,
             weights   = best_w,

@@ -1,3 +1,4 @@
+
 # test-SharpeRatio.jl
 
 using Test, LinearAlgebra, Random
@@ -131,7 +132,7 @@ const TOL = 1e-7  # slightly relaxed to avoid spurious failures across BLAS/solv
         μ = 0.02 .+ 0.05 .* rand(n)
         A = randn(n, n)
         Σ = Symmetric(A*A' + 0.2I)  # NOTE: plain + with I
-        wstar = compute_mve_weights(μ, Σ)
+        wstar = compute_mve_weights(μ, Σ)  # no normalization by default
         sr_wstar = compute_sr(wstar, μ, Σ)
         mve = compute_mve_sr(μ, Σ)
         @test abs(sr_wstar - mve) ≤ 1e-7
@@ -151,6 +152,35 @@ const TOL = 1e-7  # slightly relaxed to avoid spurious failures across BLAS/solv
         s2 = compute_mve_sr(μ, Σ_pert; stabilize_Σ=false, epsilon=0.0)
         @test isfinite(s1) && isfinite(s2)
         @test abs(s1 - s2) ≤ 1e-8
+    end
+
+    # --- NEW: weights_sum1 semantics ------------------------------------------
+    @testset "weights_sum1 semantics" begin
+        Random.seed!(4)
+        n = 8
+        μ = 0.01 .+ 0.03 .* rand(n)
+        A = randn(n, n)
+        Σ = Symmetric(A*A' + 0.15I)
+
+        # full-universe weights: normalized vs unnormalized
+        w0 = compute_mve_weights(μ, Σ; weights_sum1=false)
+        w1 = compute_mve_weights(μ, Σ; weights_sum1=true)
+        @test abs(sum(w1) - 1.0) ≤ 1e-10          # sums to one
+        # proportionality (guard against tiny denominator by requiring non-pathological μ)
+        @test norm(w1 - (w0 / sum(w0))) ≤ 1e-8
+        # SR is scale-invariant
+        sr0 = compute_sr(w0, μ, Σ)
+        sr1 = compute_sr(w1, μ, Σ)
+        @test abs(sr0 - sr1) ≤ 1e-10
+
+        # selection case: zeros off support and sum to one when requested
+        sel = sort(randperm(n)[1:5])
+        ws = compute_mve_weights(μ, Σ; selection=sel, weights_sum1=true)
+        @test all(i -> (i ∈ sel) || (ws[i] == 0.0), 1:n)
+        @test abs(sum(ws) - 1.0) ≤ 1e-10
+        # SR unaffected by normalization on selected subset
+        w_raw = compute_mve_weights(μ, Σ; selection=sel, weights_sum1=false)
+        @test abs(compute_sr(ws, μ, Σ) - compute_sr(w_raw, μ, Σ)) ≤ 1e-10
     end
 
     # --- error paths when do_checks=true --------------------------------------

@@ -2,7 +2,7 @@ module SharpeRatio
 
 using LinearAlgebra
 using Statistics
-import ..Utils: EPS_RIDGE, _prep_S
+import ..Utils: EPS_RIDGE, _prep_S, make_weights_sum1
 
 export compute_sr,
        compute_mve_sr,
@@ -34,7 +34,7 @@ end
 
 """
     compute_sr(weights, μ, Σ;
-               selection=Int[], epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=true) -> Float64
+               selection=Int[], epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=false) -> Float64
 
 Compute the Sharpe ratio of a given portfolio:
 
@@ -58,7 +58,7 @@ function compute_sr(
     selection::AbstractVector{<:Integer}=Int[],
     epsilon::Real=EPS_RIDGE,
     stabilize_Σ::Bool=true,
-    do_checks::Bool=true
+    do_checks::Bool=false
 )::Float64
     n = length(μ)
 
@@ -94,7 +94,7 @@ end
 
 """
     compute_mve_sr(μ, Σ;
-                   selection=Int[], epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=true) -> Float64
+                   selection=Int[], epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=false) -> Float64
 
 Compute the **maximum Sharpe ratio** achievable over a subset of assets:
 
@@ -114,7 +114,7 @@ function compute_mve_sr(
     selection::AbstractVector{<:Integer}=Int[],
     epsilon::Real=EPS_RIDGE,
     stabilize_Σ::Bool=true,
-    do_checks::Bool=true
+    do_checks::Bool=false
 )::Float64
     n = length(μ)
 
@@ -145,31 +145,37 @@ end
 """
     compute_mve_weights(μ, Σ;
                         selection=Int[],
-                        epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=true) -> Vector{Float64}
+                        weights_sum1::Bool=false,
+                        epsilon::Real=EPS_RIDGE,
+                        stabilize_Σ::Bool=true,
+                        do_checks::Bool=false) -> Vector{Float64}
 
 Compute **mean–variance efficient (MVE) portfolio weights**:
 
+    w = Σ^{-1} μ
 
-w^* = Σ^{-1} μ.
+If `weights_sum1=true`, the weights are renormalized so that `sum(w) = 1`.
 
 # Arguments
-- `μ`: mean vector of excess returns.
-- `Σ`: covariance matrix.
-- `selection`: (optional) subset of indices; others are set to zero.
-- `epsilon`: ridge stabilization parameter.
+- `μ`: mean vector of excess returns (length n).
+- `Σ`: covariance matrix (n×n).
+- `selection`: optional subset of indices; other positions are set to zero.
+- `weights_sum1`: if true, normalize weights to sum to one.
+- `epsilon`: ridge stabilization parameter for Σ.
 - `stabilize_Σ`: symmetrize and ridge-stabilize Σ before inversion.
-- `do_checks`: input validation.
+- `do_checks`: input validation (dimensions, finiteness, etc.).
 
 # Returns
-A vector of MVE weights.
+A length-n vector of MVE weights.
 """
 function compute_mve_weights(
     μ::AbstractVector{<:Real},
     Σ::AbstractMatrix{<:Real};
     selection::AbstractVector{<:Integer}=Int[],
+    weights_sum1::Bool=false,
     epsilon::Real=EPS_RIDGE,
     stabilize_Σ::Bool=true,
-    do_checks::Bool=true
+    do_checks::Bool=false
 )::Vector{Float64}
     n = length(μ)
 
@@ -183,6 +189,7 @@ function compute_mve_weights(
 
     Σeff = _prep_S(Σ, epsilon, stabilize_Σ)
 
+    # Compute Σ^{-1} μ (possibly on restricted support)
     if isempty(selection) || length(selection) == n
         w = _sym_solve(Σeff, μ)
     else
@@ -194,7 +201,14 @@ function compute_mve_weights(
         @inbounds w[sel] .= ws
     end
 
+    # Optional normalization to make weights sum to 1
+    if weights_sum1
+        # Classic budget: sum(w) = 1
+        w, _, _ = Utils.make_weights_sum1(w; mode=:sum)
+    end
+
     return w
 end
+
 
 end # module

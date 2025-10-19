@@ -1,13 +1,13 @@
 # SparseMaxSR.jl
 
-SparseMaxSR is a Julia package for **mean–variance portfolio selection with cardinality constraints**. It focuses on selecting **at most/ exactly _k_ assets out of _N_** to **maximize the Sharpe ratio** (or compute the mean-variance efficient weights on a given support). The toolbox currently offers:
+SparseMaxSR is a Julia package for **mean–variance portfolio selection with cardinality constraints**. It focuses on selecting **at most / exactly _k_ assets out of _N_** to **maximize the Sharpe ratio** (or to compute mean‑variance efficient weights on a given support). The toolbox offers:
 
-- **Exhaustive/Random Search** over supports (with hard caps to keep runtime bounded).
-- **MIQP Heuristic Search** (via JuMP/MathOptInterface; supports optional refit).
-- **LASSO Relaxation Search** (path-based support discovery; vanilla normalization or refit).
-- **Core Sharpe-ratio utilities** (MVE Sharpe and weights).
+- **Exhaustive / Random Search** over supports (with hard caps to keep runtime bounded).
+- **MIQP Heuristic Search** (via JuMP/MathOptInterface; optional refit; optional budget normalization).
+- **LASSO Relaxation Search** (path‑based support discovery; vanilla normalization or refit).
+- **Core Sharpe‑ratio utilities** (MVE Sharpe and weights).
 
-It is designed for **reproducible experiments** across small, medium, and very large universes.
+It is designed for **reproducible experiments** across small, medium, and large universes.
 
 ---
 
@@ -30,7 +30,8 @@ julia> Pkg.add(url="https://github.com/<org>/SparseMaxSR.jl")
 julia> using SparseMaxSR
 ```
 
-> If you maintain separate solver backends (SCS/HiGHS/Mosek), add them to your environment as needed (see **Dependencies**).
+> If you maintain separate solver backends (SCS/HiGHS/Mosek/CPLEX/…),
+> add them to your environment as needed (see **Dependencies**).
 
 ---
 
@@ -45,14 +46,33 @@ Core (direct):
 
 Suggested / optional:
 
-- One or more conic/MIP solvers (depending on your MIQP heuristic):  
-  `HiGHS`, `CPLEX`, `MosekTools`, `Gurobi`, `SCS`, `Clarabel`, `COSMO`, etc.
+- One or more conic/MIP solvers for MIQP:
+  `HiGHS`, `CPLEX`, `MosekTools`, `Gurobi`, `SCS`, `Clarabel`, `COSMO`, …
+
+---
+
+## Key Semantics (updated)
+
+### Budget / normalization via `weights_sum1::Bool`
+
+- **New:** Many entry points accept `weights_sum1::Bool=false`.
+  - When `true`, returned weights are rescaled so that **∑w = 1** (or **|∑w|=1** if the routine uses absolute normalization internally).  
+    Sharpe ratio is **scale‑invariant**, so SR **does not change** under this rescaling.
+  - When `false`, **no budget constraint is imposed** by the routine; weights may not sum to 1.
+- `compute_mve_weights` also supports `weights_sum1`; the vector is zero outside `selection` and is normalized only when requested.
+
+### Cardinality controls
+
+- `k` is the **upper bound** on support size unless an algorithm exposes `exactly_k=true` (then `|S|=k` is enforced).
+- For MIQP, a **lower bound** `m` can be provided (default behavior may set it relative to `k` in your workflow);
+  when `exactly_k=true`, the equality **takes precedence** over `m`.
 
 ---
 
 ## Exported API (overview)
 
-Below are the **main user-facing functions** you’ll typically use in experiments. All functions return **named tuples** whenever multiple outputs are expected (selection, weights, SR, status).
+All functions return **named tuples** where multiple outputs are expected
+(e.g., `selection`, `weights`, `sr`, `status`).
 
 ### SharpeRatio
 
@@ -60,21 +80,26 @@ Below are the **main user-facing functions** you’ll typically use in experimen
 compute_sr(w::AbstractVector, μ::AbstractVector, Σ::AbstractMatrix;
            epsilon::Real=EPS_RIDGE, stabilize_Σ::Bool=true, do_checks::Bool=false) -> Real
 ```
-Compute the portfolio Sharpe ratio of weights `w` given `(μ, Σ)`. If `stabilize_Σ=true`, a ridge-stabilized covariance `Σ + ε·mean(diag(Σ))·I` is used internally (controlled by `epsilon`).
+Compute the portfolio Sharpe ratio of weights `w` given `(μ, Σ)`.
+If `stabilize_Σ=true`, a ridge‑stabilized covariance `Σ + ε·mean(diag(Σ))·I` is used internally
+(controlled by `epsilon`).
 
 ```julia
 compute_mve_sr(μ::AbstractVector, Σ::AbstractMatrix;
                selection::AbstractVector{<:Integer}=Int[],
                epsilon::Real=EPS_RIDGE, stabilize_Σ::Bool=true, do_checks::Bool=false) -> Real
 ```
-Compute the **maximum** Sharpe ratio achievable by the **mean-variance efficient** portfolio **restricted to a support** `selection` (if empty, uses all assets).
+Compute the **maximum** Sharpe ratio achievable by the **mean‑variance efficient** portfolio
+**restricted to a support** `selection` (if empty, uses all assets).
 
 ```julia
 compute_mve_weights(μ::AbstractVector, Σ::AbstractMatrix;
                     selection::AbstractVector{<:Integer}=Int[],
-                    epsilon::Real=EPS_RIDGE, stabilize_Σ::Bool=true, do_checks::Bool=false) -> Vector{Float64}
+                    epsilon::Real=EPS_RIDGE, stabilize_Σ::Bool=true,
+                    weights_sum1::Bool=false, do_checks::Bool=false) -> Vector{Float64}
 ```
-Return the corresponding **MVE weights** on `selection` (full-length vector with zeros outside the support).
+Return the corresponding **MVE weights** on `selection` (full‑length vector with zeros outside the support).
+If `weights_sum1=true`, the result is rescaled to satisfy `∑w=1` (when feasible).
 
 ---
 
@@ -90,15 +115,19 @@ mve_exhaustive_search(μ::AbstractVector, Σ::AbstractMatrix, k::Integer;
     γ::Real=1.0,
     stabilize_Σ::Bool=true,
     compute_weights::Bool=false,
+    weights_sum1::Bool=false,
     do_checks::Bool=false
 ) -> NamedTuple{(:selection, :weights, :sr, :status)}
 ```
 Searches supports to maximize the **MVE Sharpe ratio**:
 
-- If `max_samples_per_k == 0`, it **tries** to enumerate all combinations at each size, but will **cap the total work** per size at `max_combinations`; when the cap binds, the routine switches to **sampling without replacement** up to the cap.
+- If `max_samples_per_k == 0`, the routine **tries** to enumerate all combinations at each size,
+  but will **cap** work per size at `max_combinations`. If the cap binds, it switches to
+  **sampling without replacement** up to the cap and returns `status = :EXHAUSTIVE_SAMPLED`.
 - If `max_samples_per_k > 0`, it samples up to that many supports per size (also bounded by the number of available combinations).
 - `exactly_k=true` restricts to size `k`; set `false` to search all sizes in `1:k`.
-- Returns `status = :EXHAUSTIVE` if full enumeration happened for all tried sizes, otherwise `:EXHAUSTIVE_SAMPLED`.
+- If `compute_weights=true`, the routine returns MVE weights on the winning support; set `weights_sum1=true`
+  to normalize them to budget **(∑w=1)**.
 
 ---
 
@@ -115,15 +144,19 @@ mve_lasso_relaxation_search(μ::AbstractVector, Σ::AbstractMatrix, T::Integer;
     stabilize_Σ::Bool=true,
     compute_weights::Bool=true,
     use_refit::Bool=true,
+    weights_sum1::Bool=false,
     do_checks::Bool=false
 ) -> NamedTuple{(:selection, :weights, :sr, :status)}
 ```
-- Builds a **path** (via `GLMNet`) and picks **the largest support** of size `≤ k`.  
-  - If it hits `k` exactly: `status = :LASSO_PATH_EXACT_K`.  
-  - Otherwise: `status = :LASSO_PATH_ALMOST_K`.  
-  - If no variables selected along the path: `status = :LASSO_ALLEMPTY`.
-- **Vanilla**: set `use_refit=false` to **normalize the coefficients** into portfolio weights (sum-to-one if possible).
-- **Refit**: set `use_refit=true` to compute **exact MVE weights on the selected support**.
+- Builds a **path** (via `GLMNet`) and picks **the largest support** of size `≤ k`.
+  - If it hits `k` exactly: `status = :LASSO_PATH_EXACT_K`.
+  - Otherwise: `status = :LASSO_PATH_ALMOST_K`.
+  - If no variables are ever selected: `status = :LASSO_ALLEMPTY`.
+- **Vanilla (use_refit=false)**: **normalize the path coefficients into portfolio weights**;
+  set `weights_sum1=true` to enforce `∑w=1` (when feasible). If the selected coefficients sum ≈ 0,
+  the routine returns `w=0`, `sr=0`, `status=:LASSO_ALLEMPTY`.
+- **Refit (use_refit=true)**: compute **exact MVE weights on the selected support**; set `weights_sum1=true`
+  to rescale the refit weights to `∑w=1`. SR is invariant to this rescaling.
 
 ---
 
@@ -132,17 +165,38 @@ mve_lasso_relaxation_search(μ::AbstractVector, Σ::AbstractMatrix, T::Integer;
 ```julia
 mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
     k::Integer,
+    m::Integer=max(0, k-1),           # lower bound on cardinality (when used)
+    γ::Real=1.0,                      # risk‑aversion in the MIQP objective
+    fmin::AbstractVector=zeros(length(μ)),
+    fmax::AbstractVector=ones(length(μ)),
+    # Heuristic expansion controls (MATLAB‑like defaults):
+    expand_rounds::Int=20,
+    expand_factor::Float64=3.0,
+    expand_tol::Float64=1e-2,
+    # Solve controls:
+    mipgap::Real=1e-4,
+    time_limit::Real=200.0,           # seconds
+    threads::Int=1,
+    # Behavior:
+    exactly_k::Bool=false,
     compute_weights::Bool=true,
     use_refit::Bool=false,
+    weights_sum1::Bool=false,         # NEW: no budget by default
     epsilon::Real=EPS_RIDGE,
     stabilize_Σ::Bool=true,
     do_checks::Bool=false,
-    # ... plus any solver routing / optimizer settings you expose
+    # Warm starts (optional):
+    x_start::AbstractVector=nothing,  # continuous weights seed
+    v_start::AbstractVector=nothing   # binary support seed
 ) -> NamedTuple{(:selection, :weights, :sr, :status)}
 ```
-- A JuMP/MathOptInterface-based heuristic for the cardinality-constrained MVE problem.
-- `use_refit=true` recomputes exact MVE weights on the found support.
-- `status` typically reflects the solver’s termination status (e.g., `MOI.OPTIMAL`) or a symbolic flag from the heuristic.
+- A JuMP/MathOptInterface‑based heuristic for the cardinality‑constrained MVE problem.
+- **Budget:** *not enforced by default* (`weights_sum1=false`). Set `weights_sum1=true`
+  to rescale final weights to `∑w=1` (SR invariant).
+- **Cardinality:** use `exactly_k=true` to enforce `|S|=k`. Otherwise, the algorithm respects the bounds `m ≤ |S| ≤ k`.
+  If both are provided and inconsistent with equality, `exactly_k=true` takes precedence.
+- **Refit:** `use_refit=true` recomputes **closed‑form MVE weights** and SR on the found support.
+- **Bounds:** elementwise `fmin ≤ w ≤ fmax` (interpreted in the MIQP stage; the final normalization step may scale within bounds if used with `weights_sum1=true`).
 
 ---
 
@@ -181,156 +235,74 @@ cell(sr, t) = isnan(sr) ? "-" : @sprintf("%.4f / %.2fs", sr, t)
 _fmt_ks(v::Vector{Int}) = isempty(v) ? "(none)" : join(sort(unique(v)), ", ")
 
 # --------------------------------
-# Runners
+# Runners (set weights_sum1=true if you want ∑w=1)
 # --------------------------------
-function run_exhaustive(μ, Σ, k; exactly_k=true, max_combinations=3_000_000)
+function run_exhaustive(μ, Σ, k; exactly_k=true, max_combinations=3_000_000, weights_sum1=false)
     tsec = @elapsed begin
         res = SparseMaxSR.mve_exhaustive_search(μ, Σ, k;
             exactly_k=exactly_k, max_samples_per_k=0, max_combinations=max_combinations,
-            epsilon=SparseMaxSR.Utils.EPS_RIDGE, stabilize_Σ=true,
-            compute_weights=true, do_checks=false)
-        global sel = res.mve_selection; global w = res.mve_weights
-        global sr = res.mve_sr;         global st = res.status
+            epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
+            compute_weights=true, weights_sum1=weights_sum1, do_checks=false)
+        global sel = res.selection; global w = res.weights
+        global sr = res.sr;         global st = res.status
     end
     return sel, w, sr, tsec, st
 end
 
-function run_miqp_vanilla(μ, Σ, k)
+function run_miqp_vanilla(μ, Σ, k; weights_sum1=false)
     tsec = @elapsed begin
         res = SparseMaxSR.mve_miqp_heuristic_search(μ, Σ; k=k,
-            compute_weights=true, use_refit=false)
-        global sel = res.mve_selection; global w = res.mve_weights
-        global sr = res.mve_sr;         global st = res.status
+            compute_weights=true, use_refit=false, weights_sum1=weights_sum1)
+        global sel = res.selection; global w = res.weights
+        global sr = res.sr;         global st = res.status
     end
     return sel, w, sr, tsec, st
 end
 
-function run_miqp_refit(μ, Σ, k)
+function run_miqp_refit(μ, Σ, k; weights_sum1=false)
     tsec = @elapsed begin
         res = SparseMaxSR.mve_miqp_heuristic_search(μ, Σ; k=k,
-            compute_weights=true, use_refit=true)
-        global sel = res.mve_selection; global w = res.mve_weights
-        global sr = res.mve_sr;         global st = res.status
+            compute_weights=true, use_refit=true, weights_sum1=weights_sum1)
+        global sel = res.selection; global w = res.weights
+        global sr = res.sr;         global st = res.status
     end
     return sel, w, sr, tsec, st
 end
 
 # LASSO runners (moment-based entry)
-function run_lasso_vanilla(R, μ, Σ, k; alpha=0.95)
+function run_lasso_vanilla(R, μ, Σ, k; alpha=0.95, weights_sum1=false)
     tsec = @elapsed begin
         res = SparseMaxSR.mve_lasso_relaxation_search(μ, Σ, size(R,1);
             k=k, nlambda=100, lambda_min_ratio=1e-5, alpha=alpha, standardize=false,
-            epsilon=SparseMaxSR.Utils.EPS_RIDGE, stabilize_Σ=true,
-            compute_weights=true, use_refit=false, do_checks=false)
-        global sel = res.mve_selection; global w = res.mve_weights
-        global sr = res.mve_sr;         global st = res.status
+            epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
+            compute_weights=true, use_refit=false, weights_sum1=weights_sum1, do_checks=false)
+        global sel = res.selection; global w = res.weights
+        global sr = res.sr;         global st = res.status
     end
     return sel, w, sr, tsec, st
 end
 
-function run_lasso_refit(R, μ, Σ, k; alpha=0.95)
+function run_lasso_refit(R, μ, Σ, k; alpha=0.95, weights_sum1=false)
     tsec = @elapsed begin
         res = SparseMaxSR.mve_lasso_relaxation_search(μ, Σ, size(R,1);
             k=k, nlambda=100, lambda_min_ratio=1e-5, alpha=alpha, standardize=false,
-            epsilon=SparseMaxSR.Utils.EPS_RIDGE, stabilize_Σ=true,
-            compute_weights=true, use_refit=true, do_checks=false)
-        global sel = res.mve_selection; global w = res.mve_weights
-        global sr = res.mve_sr;         global st = res.status
+            epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
+            compute_weights=true, use_refit=true, weights_sum1=weights_sum1, do_checks=false)
+        global sel = res.selection; global w = res.weights
+        global sr = res.sr;         global st = res.status
     end
     return sel, w, sr, tsec, st
 end
-
-# Pretty table
-function print_table(title::AbstractString, ks::Vector{Int},
-                     methods::Vector{String}, cells::Dict{Tuple{Int,String},String})
-    println("\n$title")
-    println("-"^max(10, length(title)))
-    @printf("%-6s", "k")
-    for m in methods
-        @printf(" | %-18s", m)
-    end
-    println()
-    println("-"^(6 + length(methods)*(3+18)))
-    for k in ks
-        @printf("%-6d", k)
-        for m in methods
-            c = get(cells, (k,m), "-")
-            @printf(" | %-18s", c)
-        end
-        println()
-    end
-    println()
-end
-
-# --------------------------------
-# Experiment A: T=500, N=30, k in 1,3,5,7,9
-# --------------------------------
-Random.seed!(42)
-T, N = 500, 30
-ks = [1,3,5,7,9]
-methods = ["EXHAUSTIVE", "LASSO-VANILLA", "LASSO-REFIT", "MIQP-VANILLA", "MIQP-REFIT"]
-
-cells = Dict{Tuple{Int,String},String}()
-lasso_almost = Int[]; lasso_empty = Int[]; miqp_notopt = Int[]
-
-println("SparseMaxSR example — $(timestamp())")
-println("Experiment A: T=$T, N=$N; methods=$(join(methods, \", \"))")
-R = simulate_returns(T, N)
-μ, Σ = means_and_cov(R)
-
-EXH_CAP = 3_000_000  # cap combinations for exhaustive
-
-for k in ks
-    # Exhaustive (guarded by cap)
-    if binomial(N, k) <= EXH_CAP
-        try
-            _, _, sr, t, st = run_exhaustive(μ, Σ, k; exactly_k=true, max_combinations=EXH_CAP)
-            cells[(k,"EXHAUSTIVE")] = cell(sr, t) * (st == :EXHAUSTIVE ? "" : " *")
-        catch
-            cells[(k,"EXHAUSTIVE")] = "ERR"
-        end
-    else
-        cells[(k,"EXHAUSTIVE")] = "SKIP"
-    end
-
-    # LASSO
-    try
-        _, _, sr, t, st = run_lasso_vanilla(R, μ, Σ, k; alpha=0.99)
-        cells[(k,"LASSO-VANILLA")] = st == :LASSO_ALLEMPTY ?
-            @sprintf("%-18s", "EMPTY / $(round(t; digits=2))s") : cell(sr, t)
-        st == :LASSO_PATH_ALMOST_K  && push!(lasso_almost, k)
-        st == :LASSO_ALLEMPTY       && push!(lasso_empty,  k)
-    catch
-        cells[(k,"LASSO-VANILLA")] = "ERR"
-    end
-    try
-        _, _, sr, t, st = run_lasso_refit(R, μ, Σ, k; alpha=0.99)
-        cells[(k,"LASSO-REFIT")] = cell(sr, t)
-        st == :LASSO_PATH_ALMOST_K && push!(lasso_almost, k)
-    catch
-        cells[(k,"LASSO-REFIT")] = "ERR"
-    end
-
-    # MIQP
-    try
-        _, _, sr, t, st = run_miqp_vanilla(μ, Σ, k)
-        cells[(k,"MIQP-VANILLA")] = cell(sr, t)
-        st != MOI.OPTIMAL && push!(miqp_notopt, k)
-    catch
-        cells[(k,"MIQP-VANILLA")] = "ERR"
-    end
-    try
-        _, _, sr, t, st = run_miqp_refit(μ, Σ, k)
-        cells[(k,"MIQP-REFIT")] = cell(sr, t)
-        st != MOI.OPTIMAL && push!(miqp_notopt, k)
-    catch
-        cells[(k,"MIQP-REFIT")] = "ERR"
-    end
-end
-
-print_table("Results — Experiment A (T=500, N=30)", ks, methods, cells)
-println("LASSO (both): support size < k for k ∈ {" * _fmt_ks(lasso_almost) * "}")
-println("LASSO-VANILLA: ALLEMPTY for k ∈ {" * _fmt_ks(lasso_empty) * "}")
-println("MIQP: solver not OPTIMAL for k ∈ {" * _fmt_ks(miqp_notopt) * "}")
-println("\nNote: an asterisk '*' next to EXHAUSTIVE means the run hit the max_combinations cap and fell back to sampling.")
 ```
+
+> **Tip:** Set `weights_sum1=true` in the runners above if you want weights to sum to one;
+> SR values will be identical either way (scale invariance).
+
+---
+
+## Version notes
+
+- **Budget normalization is now optional everywhere** via `weights_sum1` (default `false`).
+- **MIQP defaults** align with a MATLAB‑like heuristic setup: `time_limit=200.0`, `expand_rounds=20`, `expand_factor=3.0`, `expand_tol=1e-2`.
+- **LASSO path selection** returns the largest support `≤ k`, with statuses `:LASSO_PATH_EXACT_K`, `:LASSO_PATH_ALMOST_K`, `:LASSO_ALLEMPTY`.
+- `EPS_RIDGE` is a **scalar constant** used across routines for covariance stabilization.

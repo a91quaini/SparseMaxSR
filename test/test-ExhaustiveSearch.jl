@@ -1,3 +1,4 @@
+
 # test-ExhaustiveSearch.jl — extensive tests for mve_exhaustive_search
 # Works with the current SparseMaxSR API.
 
@@ -236,5 +237,56 @@ end
         @test res2.status == :EXHAUSTIVE
         @test res1.selection == res2.selection
         @test isapprox(res1.sr, res2.sr; atol=0, rtol=0)
+    end
+
+    # NEW ----------------------------------------------------------------------
+    @testset "weights_sum1 semantics (normalization & SR invariance)" begin
+        Random.seed!(2025)
+        n, k = 8, 4
+        μ = 0.01 .+ 0.03 .* rand(n)
+        A = randn(n,n); Σ = Symmetric(A*A' + 0.08I)
+
+        # Run twice with and without normalization
+        r_unnorm = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
+                                         epsilon=0.0, stabilize_Σ=true, compute_weights=true,
+                                         weights_sum1=false)
+        r_norm   = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
+                                         epsilon=0.0, stabilize_Σ=true, compute_weights=true,
+                                         weights_sum1=true)
+
+        # Same support and same SR (scale invariance)
+        @test r_unnorm.selection == r_norm.selection
+        @test isapprox(r_unnorm.sr, r_norm.sr; atol=0, rtol=0)
+
+        # Normalized weights: sum to one and proportional to unnormalized
+        @test abs(sum(r_norm.weights) - 1.0) ≤ 1e-10
+        @test norm(r_norm.weights - (r_unnorm.weights / sum(r_unnorm.weights))) ≤ 1e-8
+
+        # Zeros off-support
+        sel = r_norm.selection
+        @test all(i -> (i ∈ sel) || r_norm.weights[i] == 0.0, 1:n)
+        @test all(i -> (i ∈ sel) || r_unnorm.weights[i] == 0.0, 1:n)
+
+        # SR recompute equals reported SR for both
+        @test abs(_sr_exact(r_norm.weights, μ, Σ)   - r_norm.sr)   ≤ 1e-9
+        @test abs(_sr_exact(r_unnorm.weights, μ, Σ) - r_unnorm.sr) ≤ 1e-9
+    end
+
+    @testset "compute_weights=false returns same support & SR (smoke)" begin
+        Random.seed!(303)
+        n, k = 7, 3
+        μ = 0.01 .+ 0.02 .* rand(n)
+        A = randn(n,n); Σ = Symmetric(A*A' + 0.04I)
+
+        r_w  = mve_exhaustive_search(μ, Σ, k; exactly_k=true, compute_weights=true,
+                                     weights_sum1=false, stabilize_Σ=true)
+        r_nw = mve_exhaustive_search(μ, Σ, k; exactly_k=true, compute_weights=false,
+                                     stabilize_Σ=true)
+
+        @test r_w.selection == r_nw.selection
+        @test isapprox(r_w.sr, r_nw.sr; atol=0, rtol=0)
+
+        # Do not assert on the structure of r_nw.weights (implementation may choose empty or zeros)
+        @test count(!iszero, r_w.weights) == k
     end
 end

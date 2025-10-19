@@ -14,7 +14,7 @@ export mve_miqp_heuristic_search
 
 """
     _solve_once!(μ, Σ, N, k, m, γ, fmin_loc, fmax_loc;
-                 x0=nothing, v0=nothing,
+                 exactly_k::Bool=true, x0=nothing, v0=nothing,
                  mipgap=1e-4, time_limit=Inf, threads=0, verbose=false,
                  epsilon=EPS_RIDGE)
 
@@ -30,6 +30,7 @@ against `(μ, Σ)` (using the same stabilized Σ as the objective).
 function _solve_once!(
     μ::AbstractVector, Σ::AbstractMatrix, N::Int, k::Int, m::Int, γ::Float64,
     fmin_loc::Vector{Float64}, fmax_loc::Vector{Float64};
+    exactly_k::Bool=true,
     x0::Union{Nothing,AbstractVector}=nothing,
     v0::Union{Nothing,AbstractVector}=nothing,
     mipgap::Float64=1e-4, time_limit::Real=Inf, threads::Int=0,
@@ -48,8 +49,12 @@ function _solve_once!(
     @variable(model, x[1:N])
     @variable(model, v[1:N], Bin)
     @constraint(model, sum(x) == 1.0)
-    @constraint(model, sum(v) <= k)
-    @constraint(model, sum(v) >= m)
+    if exactly_k
+        @constraint(model, sum(v) == k)
+    else
+        @constraint(model, sum(v) <= k)
+        @constraint(model, sum(v) >= m)
+    end
     @constraint(model, [i=1:N], x[i] <= fmax_loc[i] * v[i])
     @constraint(model, [i=1:N], x[i] >= fmin_loc[i] * v[i])
     @objective(model, Min, 0.5 * γ * dot(x, Σ * x) - dot(μ, x))
@@ -111,6 +116,7 @@ end
 
 """
     mve_miqp_heuristic_search(μ, Σ; k,
+                              exactly_k::Bool=true,
                               m::Int=0, γ::Float64=1.0,
                               fmin=zeros(length(μ)), fmax=ones(length(μ)),
                               expand_rounds::Int=2,
@@ -147,6 +153,7 @@ Arguments are as usual; `γ` is passed through to `compute_mve_weights` in the r
 """
 function mve_miqp_heuristic_search(
     μ::AbstractVector, Σ::AbstractMatrix; k::Int,
+    exactly_k::Bool=true,
     m::Int=0, γ::Float64=1.0,
     fmin::AbstractVector=zeros(length(μ)),
     fmax::AbstractVector=ones(length(μ)),
@@ -178,10 +185,14 @@ function mve_miqp_heuristic_search(
             fmin[i] ≤ fmax[i] || error("Require fmin[i] ≤ fmax[i] for all i.")
         end
         # Feasibility quick check
-        sum_largest_k = sum(partialsort!(collect(fmax), 1:k; rev=true))
-        sum_smallest_k = sum(partialsort!(collect(fmin), 1:k))
+        sum_largest_k = sum(partialsort(fmax, 1:k; rev=true))
+        sum_smallest_k = sum(partialsort(fmin, 1:k))
         sum_largest_k ≥ 1 || error("Infeasible caps: k * max fmax must allow sum(x)=1.")
         sum_smallest_k ≤ 1 || error("Infeasible lower bounds: sum of k smallest fmin exceeds 1.")
+    end
+
+    if exactly_k
+        m = k
     end
 
     # Stabilize Σ once (or just symmetrize if stabilize_Σ=false) —
@@ -192,7 +203,7 @@ function mve_miqp_heuristic_search(
     fmax_work = Float64.(fmax)
 
     sol = _solve_once!(μ, Σs, N, k, m, γ, fmin_work, fmax_work;
-                       x0=x_start, v0=v_start,
+                       exactly_k, x0=x_start, v0=v_start,
                        mipgap=mipgap, time_limit=time_limit, threads=threads,
                        verbose=verbose, epsilon=epsilon)
 
@@ -207,7 +218,7 @@ function mve_miqp_heuristic_search(
         active==0 && break
         _expand_bounds!(sol.x, sol.v, fmin_work, fmax_work, expand_factor, expand_tol)
         sol = _solve_once!(μ, Σs, N, k, m, γ, fmin_work, fmax_work;
-                           x0=sol.x, v0=sol.v,
+                           exactly_k, x0=sol.x, v0=sol.v,
                            mipgap=mipgap, time_limit=time_limit, threads=threads,
                            verbose=verbose, epsilon=epsilon)
     end

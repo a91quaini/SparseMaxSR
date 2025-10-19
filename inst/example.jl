@@ -60,9 +60,15 @@ end
 # MIQP heuristic — VANILLA (no refit), returns what the MIQP heuristic solved
 function run_miqp_vanilla(μ, Σ, k)
     sel = w = nothing; sr = NaN; st = :UNKNOWN
+    δ = 1e-3 / k
+    fmin = fill(δ, length(μ))
+    fmax = ones(length(μ))
     tsec = @elapsed begin
         sel, w, sr, st = SparseMaxSR.mve_miqp_heuristic_search(
-            μ, Σ; k=k,
+            μ, Σ; k = k,
+            exactly_k = true,
+            fmin = fmin,
+            fmax = fmax,
             compute_weights=true,
             use_refit=false
         )
@@ -214,7 +220,7 @@ for k in ks
         _, _, sr, t, st = run_miqp_vanilla(μ, Σ, k)
         cells[(k,"MIQP-VANILLA")] = cell(sr, t)
         if st != MOI.OPTIMAL
-            push!(miqp_notopt_D, k)
+            push!(miqp_notopt_A, k)
         end
     catch
         cells[(k,"MIQP-VANILLA")] = "ERR"
@@ -225,7 +231,7 @@ for k in ks
         _, _, sr, t, st = run_miqp_refit(μ, Σ, k)
         cells[(k,"MIQP-REFIT")] = cell(sr, t)
         if st != MOI.OPTIMAL
-            push!(miqp_notopt_D, k)
+            push!(miqp_notopt_A, k)
         end
     catch
         cells[(k,"MIQP-REFIT")] = "ERR"

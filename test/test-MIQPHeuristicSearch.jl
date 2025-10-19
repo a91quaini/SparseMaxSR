@@ -1,4 +1,4 @@
-# test-MIQPHeuristicSearch.jl — tests for mve_miqp_heuristic_search with refit toggle
+# test-MIQPHeuristicSearch.jl — tests for mve_miqp_heuristic_search with refit toggle + exactly_k
 
 using Test, Random, LinearAlgebra, Statistics
 using SparseMaxSR
@@ -15,11 +15,9 @@ end
 # Recompute REFIT SR on a given selection using the same Σ stabilization choice as the call
 _refit_sr(μ, Σ; selection, stabilize_Σ::Bool, epsilon=0.0) = begin
     if stabilize_Σ
-        # When the search is called with stabilize_Σ=true, it internally uses _prep_S.
-        # We don't have _prep_S here; rely on compute_mve_sr with stabilize_Σ=true to mirror that.
+        # Mirror internal stabilization behavior when requested
         compute_mve_sr(μ, Σ; selection=selection, epsilon=epsilon, stabilize_Σ=true, do_checks=false)
     else
-        # When stabilize_Σ=false, the search symmetrizes once and then calls with stabilize_Σ=false.
         Σs = Symmetric((Σ + Σ')/2)
         compute_mve_sr(μ, Σs; selection=selection, epsilon=epsilon, stabilize_Σ=false, do_checks=false)
     end
@@ -40,12 +38,13 @@ end
                                         fmin=fmin, fmax=fmax,
                                         expand_rounds=1, mipgap=1e-5, time_limit=30.0,
                                         threads=1, stabilize_Σ=false,
-                                        compute_weights=true, use_refit=false, do_checks=true)
+                                        compute_weights=true, use_refit=false, do_checks=true,
+                                        exactly_k=false)  # explicit: old behavior
 
         @test res.status isa MOI.TerminationStatusCode
         @test isfinite(res.sr)
         @test abs(sum(res.weights) - 1.0) ≤ 1e-10
-        # cardinality: count positive weights approximates chosen support
+        # cardinality: m ≤ |S| ≤ k
         supp = sum(abs.(res.weights) .> 1e-12)
         @test m ≤ supp ≤ k
         # box bounds respected for active coords; and never exceed fmax anywhere
@@ -53,6 +52,68 @@ end
         @test all(res.weights[res.weights .> 1e-12] .≥ minimum(fmin) - 1e-12)
         # SR consistency with the same stabilization choice
         @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-7
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW: exactly_k=true — strict cardinality (non-refit)
+    # ─────────────────────────────────────────────────────────────────────────
+    @testset "exactly_k=true enforces |S| == k (non-refit)" begin
+        Random.seed!(2025)
+        n, k = 12, 5
+        μ = 0.01 .+ 0.04 .* rand(n)
+        A = randn(n,n); Σ = Symmetric(A*A' + 0.06I)
+
+        res = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
+                                        stabilize_Σ=false, compute_weights=true,
+                                        use_refit=false, threads=1,
+                                        exactly_k=true)
+
+        @test length(res.selection) == k
+        @test abs(sum(res.weights) - 1.0) ≤ 1e-10
+        @test count(!iszero, res.weights) ≥ k  # zeros outside selection allowed, active ≥ k numerically
+        # SR recompute
+        @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-8
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW: exactly_k=true — strict cardinality (refit)
+    # ─────────────────────────────────────────────────────────────────────────
+    @testset "exactly_k=true with refit: |S| == k and SR equals closed-form on S" begin
+        Random.seed!(2026)
+        n, k = 10, 4
+        μ = 0.015 .+ 0.03 .* rand(n)
+        A = randn(n,n); Σ = Symmetric(A*A' + 0.04I)
+
+        r_rf = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
+                                         stabilize_Σ=false, compute_weights=true,
+                                         use_refit=true, threads=1,
+                                         exactly_k=true)
+
+        @test length(r_rf.selection) == k
+        # Refitted SR must match the closed-form MVE SR on the same subset
+        sr_expected = _refit_sr(μ, Σ; selection=r_rf.selection, stabilize_Σ=false, epsilon=0.0)
+        @test isapprox(r_rf.sr, sr_expected; atol=1e-9, rtol=0)
+        # Returned weights should also attain that SR
+        sr_w = compute_sr(r_rf.weights, μ, Σ; selection=r_rf.selection, stabilize_Σ=false, epsilon=0.0)
+        @test isapprox(sr_w, sr_expected; atol=1e-8, rtol=0)
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # NEW: exactly_k=true overrides m (if provided inconsistently)
+    # ─────────────────────────────────────────────────────────────────────────
+    @testset "exactly_k=true overrides/ignores m: result still has |S|==k" begin
+        Random.seed!(2027)
+        n, k, m = 11, 3, 1   # inconsistent only if someone expects m to bind with equality
+        μ = 0.01 .+ 0.03 .* rand(n)
+        A = randn(n,n); Σ = Symmetric(A*A' + 0.05I)
+
+        res = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
+                                        stabilize_Σ=false, compute_weights=true,
+                                        use_refit=false, threads=1,
+                                        exactly_k=true)
+
+        @test length(res.selection) == k
+        @test abs(sum(res.weights) - 1.0) ≤ 1e-10
     end
 
     @testset "k = 1 diagonal-Σ case selects argmax of μ_i - 0.5γσ_i^2 (non-refit)" begin
@@ -67,7 +128,9 @@ end
 
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=1, γ=γ,
                                         stabilize_Σ=false, compute_weights=true,
-                                        use_refit=false, threads=1)
+                                        use_refit=false, threads=1,
+                                        exactly_k=true)  # strict 1-of-N
+
         @test sum(abs.(res.weights) .> 1e-12) == 1
         @test findmax(res.weights)[2] == best
         @test abs(res.weights[best] - 1.0) ≤ 1e-10
@@ -80,35 +143,30 @@ end
         μ = 0.01 .+ 0.03 .* rand(n)
         A = randn(n, n); Σ = Symmetric(A*A' + 0.05I)
 
-        # First run non-refit to get MIQP x & selection
         r_nr = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
-                                        stabilize_Σ=false, compute_weights=true,
-                                        use_refit=false, threads=1)
+                                         stabilize_Σ=false, compute_weights=true,
+                                         use_refit=false, threads=1,
+                                         exactly_k=true)
 
-        # Now refit on the same instance
         r_rf = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
-                                        stabilize_Σ=false, compute_weights=true,
-                                        use_refit=true, threads=1)
+                                         stabilize_Σ=false, compute_weights=true,
+                                         use_refit=true, threads=1,
+                                         exactly_k=true)
 
-        # Selection should be identical (refit uses MIQP support)
         @test r_rf.selection == r_nr.selection
 
-        # SR should match closed-form refit SR on that support (same stabilization choice)
         sr_expected = _refit_sr(μ, Σ; selection=r_nr.selection,
                                 stabilize_Σ=false, epsilon=0.0)
         @test isapprox(r_rf.sr, sr_expected; atol=1e-9, rtol=0)
 
-        # Sharpe ratio of the returned refit weights must equal closed-form SR on that support
         w = r_rf.weights
         sr_refit = SparseMaxSR.compute_sr(w, μ, Σ; selection=r_rf.selection,
-                                        stabilize_Σ=false, epsilon=0.0)
+                                          stabilize_Σ=false, epsilon=0.0)
         sr_star  = SparseMaxSR.compute_mve_sr(μ, Σ; selection=r_rf.selection,
-                                            stabilize_Σ=false, epsilon=0.0)
+                                              stabilize_Σ=false, epsilon=0.0)
 
         @test isfinite(sr_refit)
         @test abs(sr_refit - sr_star) ≤ 1e-8
-
-        # Typically (no box constraints here) refit SR ≥ MIQP SR
         @test r_rf.sr + 1e-12 ≥ r_nr.sr
     end
 
@@ -120,14 +178,15 @@ end
 
         r_rf0 = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                           stabilize_Σ=false, compute_weights=false,
-                                          use_refit=true, threads=1)
+                                          use_refit=true, threads=1,
+                                          exactly_k=true)
 
         @test isempty(setdiff(findall(!iszero, r_rf0.weights), Int[]))  # all zeros
         sr_expected = _refit_sr(μ, Σ; selection=r_rf0.selection, stabilize_Σ=false, epsilon=0.0)
         @test isapprox(r_rf0.sr, sr_expected; atol=1e-9, rtol=0)
     end
 
-    @testset "enforcing m (minimum cardinality) and k (non-refit)" begin
+    @testset "enforcing m (minimum cardinality) and k (non-refit, exactly_k=false)" begin
         Random.seed!(321)
         n, k, m = 7, 4, 2
         μ = 0.01 .+ 0.03 .* rand(n)
@@ -135,7 +194,8 @@ end
 
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                         stabilize_Σ=false, compute_weights=true,
-                                        use_refit=false, threads=1)
+                                        use_refit=false, threads=1,
+                                        exactly_k=false)
         supp = sum(abs.(res.weights) .> 1e-12)
         @test m ≤ supp ≤ k
         @test abs(sum(res.weights) - 1.0) ≤ 1e-10
@@ -154,7 +214,8 @@ end
         res = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
                                         fmin=fmin, fmax=fmax,
                                         stabilize_Σ=false, compute_weights=true,
-                                        use_refit=false, threads=1)
+                                        use_refit=false, threads=1,
+                                        exactly_k=false)
 
         x = res.weights
         @test all(x .≤ fmax .+ 1e-12)
@@ -179,11 +240,13 @@ end
         r0  = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                         fmin=fmin, fmax=fmax,
                                         expand_rounds=0, stabilize_Σ=false,
-                                        use_refit=false, threads=1)
+                                        use_refit=false, threads=1,
+                                        exactly_k=false)
         r2  = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                         fmin=fmin, fmax=fmax,
                                         expand_rounds=2, expand_factor=2.0, expand_tol=1e-9,
-                                        stabilize_Σ=false, use_refit=false, threads=1)
+                                        stabilize_Σ=false, use_refit=false, threads=1,
+                                        exactly_k=false)
         @test r2.sr + 1e-12 ≥ r0.sr
     end
 
@@ -196,12 +259,14 @@ end
 
         r0 = mve_miqp_heuristic_search(μ, Σsing; k=k, γ=1.0,
                                        epsilon=0.0, stabilize_Σ=false,
-                                       use_refit=false, threads=1)
+                                       use_refit=false, threads=1,
+                                       exactly_k=false)
         @test isfinite(r0.sr)
 
         rE = mve_miqp_heuristic_search(μ, Σsing; k=k, γ=1.0,
                                        epsilon=1e-2, stabilize_Σ=false,
-                                       use_refit=false, threads=1)
+                                       use_refit=false, threads=1,
+                                       exactly_k=false)
         @test isfinite(rE.sr)
     end
 
@@ -213,10 +278,12 @@ end
 
         r1 = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                        stabilize_Σ=false, compute_weights=true,
-                                       use_refit=false, threads=1)
+                                       use_refit=false, threads=1,
+                                       exactly_k=true)
         r2 = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                        stabilize_Σ=false, compute_weights=true,
-                                       use_refit=false, threads=1)
+                                       use_refit=false, threads=1,
+                                       exactly_k=true)
 
         @test isapprox(r1.sr, r2.sr; atol=0, rtol=0)
         @test isapprox(r1.weights, r2.weights; atol=0, rtol=0)
@@ -231,14 +298,16 @@ end
 
         r = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                       stabilize_Σ=false, compute_weights=true,
-                                      use_refit=false, threads=1)
+                                      use_refit=false, threads=1,
+                                      exactly_k=true)
 
         v0 = zeros(Int, n); v0[findall(>(1e-10), r.weights)] .= 1
 
         r_restart = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                               x_start=r.weights, v_start=v0,
                                               stabilize_Σ=false, compute_weights=true,
-                                              use_refit=false, threads=1)
+                                              use_refit=false, threads=1,
+                                              exactly_k=true)
 
         @test r_restart.selection == r.selection
         @test isapprox(r_restart.weights, r.weights; atol=0, rtol=0)
@@ -251,7 +320,7 @@ end
         @test_throws ErrorException mve_miqp_heuristic_search(μ, ones(2,3); k=1, do_checks=true)
         @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=0, do_checks=true)
         @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=3, do_checks=true)
-        @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=1, m=2, do_checks=true)
+        @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=1, m=2, do_checks=true, exactly_k=false)
         @test_throws ErrorException mve_miqp_heuristic_search([0.1, Inf], Σ; k=1, do_checks=true)
         @test_throws ErrorException mve_miqp_heuristic_search(μ, [NaN 0; 0 1]; k=1, do_checks=true)
         @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=1, γ=-1.0, do_checks=true)
@@ -273,12 +342,14 @@ end
 
         res = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                         time_limit=0.1, mipgap=1e-3, threads=1,
-                                        stabilize_Σ=false, use_refit=false)
+                                        stabilize_Σ=false, use_refit=false,
+                                        exactly_k=false)
         @test isfinite(res.sr)
 
         res2 = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
                                          time_limit=0.1, mipgap=1e-3, threads=1,
-                                         stabilize_Σ=false, use_refit=true)
+                                         stabilize_Σ=false, use_refit=true,
+                                         exactly_k=true)
         @test isfinite(res2.sr)
     end
 end

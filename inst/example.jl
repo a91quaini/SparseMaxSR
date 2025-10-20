@@ -12,7 +12,7 @@
 # * Cells show "SR / time_s", where SR is the Sharpe ratio and time_s is seconds.
 # * LASSO-VANILLA is the normalize-coeffs branch (may return :LASSO_ALLEMPTY).
 # * LASSO-REFIT refits exact MVE on the selected support.
-# * MIQP uses a cardinality band m=k-1..k, with no budget constraint (weights_sum1=false),
+# * MIQP uses a cardinality band m=k-1..k, with no budget constraint (normalize_weights=false),
 #   and MATLAB-like defaults: time_limit=200, expand_rounds=20, expand_factor=3.0, expand_tol=1e-2.
 #
 using SparseMaxSR
@@ -57,7 +57,7 @@ function run_exhaustive(μ, Σ, k)
 end
 
 # MIQP heuristic — VANILLA (no refit)
-# Spec: use band m=k-1..k, weights_sum1=false, MATLAB-like defaults.
+# Spec: use band m=k-1..k, normalize_weights=false, MATLAB-like defaults.
 function run_miqp_vanilla(μ, Σ, k)
     sel = w = nothing; sr = NaN; st = :UNKNOWN
     tsec = @elapsed begin
@@ -68,20 +68,20 @@ function run_miqp_vanilla(μ, Σ, k)
             m = max(0, k-1),
             exactly_k = false,
             # bounds (optional; keep wide-open defaults)
-            # fmin = zeros(length(μ)),
-            # fmax = ones(length(μ)),
+            fmin = fill(1e-6, length(μ)),
+            fmax = ones(length(μ)),
             # matlab-like controls
             expand_rounds = 20,
             expand_factor = 3.0,
             expand_tol    = 1e-2,
             mipgap        = 1e-4,   # keep modest tolerance
             time_limit    = 200.0,
-            threads       = 1,
+            threads       = max(Threads.nthreads()-1, 1),
             # stabilization & ridge
             epsilon       = SparseMaxSR.EPS_RIDGE,
             stabilize_Σ   = true,
             # per-spec
-            weights_sum1  = false,
+            normalize_weights  = false,
             compute_weights = true,
             use_refit     = false,
             do_checks     = false
@@ -97,17 +97,19 @@ function run_miqp_refit(μ, Σ, k)
         sel, w, sr, st = SparseMaxSR.mve_miqp_heuristic_search(
             μ, Σ;
             k = k,
-            m = max(0, k-1),
+            m = m = max(0, k-1),
             exactly_k = false,
+            fmin = fill(1e-6, length(μ)),
+            fmax = ones(length(μ)),
             expand_rounds = 20,
             expand_factor = 3.0,
             expand_tol    = 1e-2,
             mipgap        = 1e-4,
             time_limit    = 200.0,
-            threads       = 1,
+            threads       = max(Threads.nthreads()-1, 1),
             epsilon       = SparseMaxSR.EPS_RIDGE,
             stabilize_Σ   = true,
-            weights_sum1  = false,
+            normalize_weights  = false,
             compute_weights = true,
             use_refit     = true,
             do_checks     = false
@@ -132,7 +134,7 @@ function run_lasso_vanilla(R, μ, Σ, k; alpha=0.95)
             compute_weights = true,     # ignored in vanilla branch; harmless
             use_refit = false,          # vanilla = normalized β
             do_checks = false,
-            weights_sum1 = false
+            normalize_weights = false
         )
     end
     return sel, w, sr, tsec, st
@@ -154,7 +156,7 @@ function run_lasso_refit(R, μ, Σ, k; alpha=0.95)
             compute_weights = true,     # request refit weights
             use_refit = true,           # refit MVE on support
             do_checks = false,
-            weights_sum1 = false
+            normalize_weights = false
         )
     end
     return sel, w, sr, tsec, st

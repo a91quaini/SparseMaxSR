@@ -1,10 +1,12 @@
 module MIQPHeuristicSearch
 
-using LinearAlgebra, Statistics
-using JuMP, CPLEX
+using LinearAlgebra
+using Statistics
+using JuMP
 import MathOptInterface as MOI
-import ..SharpeRatio: compute_sr, compute_mve_sr, compute_mve_weights
-import ..Utils: EPS_RIDGE, _prep_S, make_weights_sum1
+using CPLEX
+using ..Utils
+using ..SharpeRatio
 
 export mve_miqp_heuristic_search
 
@@ -14,11 +16,11 @@ export mve_miqp_heuristic_search
 
 """
     _solve_once!(μ, Σ, N, k, m, γ, fmin_loc, fmax_loc;
-                 budget_constraint::Bool=false,            # NEW (default: no budget)
+                 budget_constraint::Bool=false,            # default: no budget
                  exactly_k::Bool=false,
                  x0=nothing, v0=nothing,
                  mipgap=1e-4, time_limit=200, threads=0,   # defaults mimic MATLAB setup
-                 verbose=false, epsilon=EPS_RIDGE)
+                 verbose=false, epsilon=Utils.EPS_RIDGE)
 
 Single MIQP solve with cardinality and box constraints:
 
@@ -35,7 +37,7 @@ function _solve_once!(
     x0::Union{Nothing,AbstractVector}=nothing,
     v0::Union{Nothing,AbstractVector}=nothing,
     mipgap::Float64=1e-4, time_limit::Real=200, threads::Int=0,
-    verbose::Bool=false, epsilon::Real=EPS_RIDGE,
+    verbose::Bool=false, epsilon::Real=Utils.EPS_RIDGE,
 )
     model = Model(CPLEX.Optimizer)
     if !verbose; set_silent(model); end
@@ -82,7 +84,7 @@ function _solve_once!(
     xx = value.(x)
     vv = value.(v)
     vv = [ (isfinite(vv[i]) && vv[i] ≥ 0.5) ? 1 : 0 for i in 1:N ]
-    sr = compute_sr(xx, μ, Σ; epsilon=epsilon, stabilize_Σ=false, do_checks=false)
+    sr = SharpeRatio.compute_sr(xx, μ, Σ; epsilon=epsilon, stabilize_Σ=false, do_checks=false)
 
     return (x = collect(xx),
             v = vv,
@@ -138,11 +140,11 @@ end
 
         # Outputs & refit
         compute_weights::Bool = false,
-        weights_sum1::Bool = false,   # also controls budget constraint (see Notes)
+        normalize_weights::Bool = false,   # also controls budget constraint (see Key behaviors)
         use_refit::Bool = true,
 
         # Numerics & checks
-        epsilon::Real = EPS_RIDGE,
+        epsilon::Real = Utils.EPS_RIDGE,
         stabilize_Σ::Bool = true,
         verbose::Bool = false,
         do_checks::Bool = false
@@ -152,11 +154,11 @@ Heuristic MIQP for **mean–variance efficient (MVE) selection** with cardinalit
 box constraints. The core model solves
 
     minimize   0.5 · x' Σₛ x  −  μ' x
-    subject to (optional)  ∑ᵢ xᵢ = 1            # only if `weights_sum1 = true`
+    subject to (optional)  ∑ᵢ xᵢ = 1            # only if `normalize_weights = true`
                m ≤ ∑ᵢ vᵢ ≤ k    (or ∑ᵢ vᵢ = k if `exactly_k=true`)
                fminᵢ · vᵢ ≤ xᵢ ≤ fmaxᵢ · vᵢ,    vᵢ ∈ {0,1}
 
-where Σₛ = `_prep_S(Σ, epsilon, stabilize_Σ)` if stabilization is enabled; otherwise
+where Σₛ = `Utils._prep_S(Σ, epsilon, stabilize_Σ)` if stabilization is enabled; otherwise
 Σ is symmetrized once and reused.
 
 The routine optionally performs **bound-expansion rounds**: if any active weight sits
@@ -167,21 +169,21 @@ original MATLAB code that progressively relaxes caps when the incumbent hits the
 # Key behaviors
 
 - **Budget constraint**:
-  - By **default** (`weights_sum1=false`) there is **no** ∑x=1 constraint, matching the MATLAB QCP/MISOCO setup.
-  - If `weights_sum1=true`, the model **adds** ∑x=1 and the returned weights are additionally
-    (re)normalized to sum to 1 with a 1e-7 safeguard (has no effect on Sharpe, but fixes scale).
+  - By **default** (`normalize_weights=false`) there is **no** ∑x=1 constraint, matching the MATLAB QCP/MISOCO setup.
+  - If `normalize_weights=true`, the model **adds** ∑x=1 and the returned weights are additionally
+    (re)scaled via `Utils.normalize_weights(w)` (relative L1 safeguard).
 
 - **Cardinality**:
   - Default is a **band**: `exactly_k=false` with lower bound `m = max(0, k-1)` and upper bound `k`.
   - Set `exactly_k=true` to enforce **exactly k** active names.
 
 - **Refit vs raw MIQP** (`use_refit`):
-  - If `use_refit=true` (default): we use only the **selection** from the MIQP and then
-    compute the **exact MVE Sharpe** on that support via `compute_mve_sr(μ, Σₛ; selection=...)`.
+  - If `use_refit=true` (default): we use the **selection** from the MIQP and then
+    compute the **exact MVE Sharpe** on that support via `SharpeRatio.compute_mve_sr(μ, Σₛ; selection=...)`.
     If `compute_weights=true`, weights are produced by
-    `compute_mve_weights(μ, Σₛ; selection=..., weights_sum1=...)`.
+    `SharpeRatio.compute_mve_weights(μ, Σₛ; selection=..., normalize_weights=normalize_weights)`.
   - If `use_refit=false`: we keep the **raw MIQP portfolio `x`**. If `compute_weights=true`,
-    the returned weights are `x` (renormalized to sum to 1 only when `weights_sum1=true`).
+    the returned weights are `x` (optionally post-normalized if `normalize_weights=true`).
 
 - **Scale & Sharpe**:
   Sharpe ratio `SR = (μ' w) / sqrt(w' Σₛ w)` is **scale-invariant**. Whether or not you
@@ -203,8 +205,8 @@ original MATLAB code that progressively relaxes caps when the incumbent hits the
   - `x_start`, `v_start`: optional warm starts for continuous and binary variables.
 
 - `compute_weights`: return a weight vector (full length, zeros off support).
-- `weights_sum1`: if true, **(i)** impose ∑x=1 in the MIQP and **(ii)** post-normalize returned
-  weights to sum to 1 (safeguard: denominator `max(|∑w|, 1e-7)` with sign).
+- `normalize_weights`: if true, **(i)** impose ∑x=1 in the MIQP and **(ii)** post-normalize returned
+  weights using `Utils.normalize_weights`.
 - `use_refit`: use MIQP **selection** then refit closed-form MVE on Σₛ; otherwise keep raw `x`.
 
 - `epsilon`, `stabilize_Σ`: stabilization of Σ via ridge/symmetrization; applied once.
@@ -218,21 +220,9 @@ A named tuple:
 - `weights::Vector{Float64}` — either refit MVE weights on `selection` (if `use_refit && compute_weights`)
   or the raw MIQP `x` (if `!use_refit && compute_weights`), or an all-zero vector otherwise.
 - `sr::Float64` — Sharpe ratio:
-  - refit branch: computed with `compute_mve_sr(μ, Σₛ; selection=selection)`;
+  - refit branch: computed with `SharpeRatio.compute_mve_sr(μ, Σₛ; selection=selection)`;
   - vanilla branch: computed directly on the returned `weights` (or `x`), using Σₛ.
 - `status` — MOI termination status from the last MIQP solve.
-
-# Notes & recommendations
-
-- **MATLAB compatibility**: defaults (`weights_sum1=false`, band cardinality, expansion settings,
-  `time_limit=200`) are chosen to mimic the MATLAB QCP/MISOCO behavior (no budget, expanding caps).
-- **Feasibility checks**: because the budget may be absent, we do not pre-screen `fmin/fmax`
-  for ∑x=1 feasibility. If you enable `weights_sum1=true`, ensure caps can support a unit budget.
-- **Normalization safeguard**: when `weights_sum1=true`, normalization uses a 1e-7 floor on |∑w|
-  to avoid blow-ups if the sum is numerically ~0.
-- **Per-asset linking**: the formulation uses per-asset `fminᵢ,fmaxᵢ` (tighter than global caps).
-- **Reproducibility**: bound expansion is deterministic given inputs; solver may return different
-  incumbents under different thread counts or time limits.
 
 """
 function mve_miqp_heuristic_search(
@@ -247,9 +237,9 @@ function mve_miqp_heuristic_search(
     x_start::Union{Nothing,AbstractVector}=nothing,
     v_start::Union{Nothing,AbstractVector}=nothing,
     compute_weights::Bool=false,
-    weights_sum1::Bool=false,
+    normalize_weights::Bool=false,
     use_refit::Bool=true,
-    verbose::Bool=false, epsilon::Real=EPS_RIDGE,
+    verbose::Bool=false, epsilon::Real=Utils.EPS_RIDGE,
     stabilize_Σ::Bool=true, do_checks::Bool=false
 )
     N = length(μ)
@@ -279,13 +269,13 @@ function mve_miqp_heuristic_search(
     end
 
     # Stabilize Σ once (or just symmetrize if stabilize_Σ=false)
-    Σs = stabilize_Σ ? _prep_S(Σ, epsilon, true) : Symmetric((Σ + Σ')/2)
+    Σs = stabilize_Σ ? Utils._prep_S(Σ, epsilon, true) : Symmetric((Σ + Σ')/2)
 
     fmin_work = Float64.(fmin)
     fmax_work = Float64.(fmax)
 
-    # Budget is tied to weights_sum1: only impose if we intend sum(w)=1 output.
-    budget_on = weights_sum1
+    # Budget is tied to normalize_weights: only impose if we intend sum(w)=1 output.
+    budget_on = normalize_weights
 
     sol = _solve_once!(μ, Σs, N, k, m_eff, γ, fmin_work, fmax_work;
                        budget_constraint=budget_on,
@@ -315,24 +305,23 @@ function mve_miqp_heuristic_search(
     subset = findall(==(1), sol.v)
 
     if !use_refit
-        # Vanilla MIQP portfolio (optionally normalize to sum=1 with safeguard)
+        # Vanilla MIQP portfolio (optionally normalize with relative L1 safeguard)
         w = compute_weights ? copy(sol.x) : zeros(Float64, N)
-        if compute_weights && weights_sum1
-            # Classic budget for MIQP outputs: sum(w) = 1
-            w, _, _ = make_weights_sum1(w; mode=:abs)
+        if compute_weights && normalize_weights
+            w = Utils.normalize_weights(w)   # uses defaults: mode=:relative, tol=1e-6
         end
         return (selection=subset, weights=w, sr=sol.sr, status=sol.status)
     else
-        # Refit on selection (Sharpe uses Σs; weights normalization controlled by weights_sum1)
+        # Refit on selection (Sharpe uses Σs; weight normalization controlled by flag)
         if isempty(subset)
             w = zeros(Float64, N)
             return (selection=subset, weights=w, sr=0.0, status=sol.status)
         end
-        sr_refit = compute_mve_sr(μ, Σs; selection=subset,
+        sr_refit = SharpeRatio.compute_mve_sr(μ, Σs; selection=subset,
                                   epsilon=epsilon, stabilize_Σ=false, do_checks=false)
         w_refit = compute_weights ?
-                  compute_mve_weights(μ, Σs; selection=subset,
-                                      weights_sum1=weights_sum1,
+                  SharpeRatio.compute_mve_weights(μ, Σs; selection=subset,
+                                      normalize_weights=normalize_weights,
                                       epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
                   zeros(Float64, N)
         return (selection=subset, weights=w_refit, sr=sr_refit, status=sol.status)

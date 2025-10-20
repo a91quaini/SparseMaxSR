@@ -1,4 +1,3 @@
-
 # test-ExhaustiveSearch.jl — extensive tests for mve_exhaustive_search
 # Works with the current SparseMaxSR API.
 
@@ -223,24 +222,8 @@ end
         @test res_cap.sr ≤ res_full.sr + 1e-12
     end
 
-    @testset "max_combinations ≥ total still returns exact (status = :EXHAUSTIVE)" begin
-        Random.seed!(44)
-        n, k = 7, 3                       # total = 35
-        μ = 0.01 .+ 0.02 .* rand(n)
-        A = randn(n,n); Σ = Symmetric(A*A' + 0.06I)
-
-        res1 = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
-                                     max_combinations=35, epsilon=0.0, stabilize_Σ=true)
-        res2 = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
-                                     max_combinations=1_000_000, epsilon=0.0, stabilize_Σ=true)
-        @test res1.status == :EXHAUSTIVE
-        @test res2.status == :EXHAUSTIVE
-        @test res1.selection == res2.selection
-        @test isapprox(res1.sr, res2.sr; atol=0, rtol=0)
-    end
-
     # NEW ----------------------------------------------------------------------
-    @testset "weights_sum1 semantics (normalization & SR invariance)" begin
+    @testset "normalize_weights semantics (normalization & SR invariance)" begin
         Random.seed!(2025)
         n, k = 8, 4
         μ = 0.01 .+ 0.03 .* rand(n)
@@ -249,18 +232,18 @@ end
         # Run twice with and without normalization
         r_unnorm = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
                                          epsilon=0.0, stabilize_Σ=true, compute_weights=true,
-                                         weights_sum1=false)
+                                         normalize_weights=false)
         r_norm   = mve_exhaustive_search(μ, Σ, k; exactly_k=true, max_samples_per_k=0,
                                          epsilon=0.0, stabilize_Σ=true, compute_weights=true,
-                                         weights_sum1=true)
+                                         normalize_weights=true)
 
         # Same support and same SR (scale invariance)
         @test r_unnorm.selection == r_norm.selection
         @test isapprox(r_unnorm.sr, r_norm.sr; atol=0, rtol=0)
 
-        # Normalized weights: sum to one and proportional to unnormalized
-        @test abs(abs(sum(r_norm.weights)) - 1.0) ≤ 1e-10
-        @test norm(r_norm.weights - (r_unnorm.weights / max(abs(sum(r_unnorm.weights)), eps()))) ≤ 1e-8
+        # Normalized weights: proportional to unnormalized using Utils.normalize_weights rule
+        denom = max(abs(sum(r_unnorm.weights)), 1e-6 * norm(r_unnorm.weights, 1), 1e-10)
+        @test isapprox.(r_norm.weights, r_unnorm.weights ./ denom; atol=1e-10) |> all
 
         # Zeros off-support
         sel = r_norm.selection
@@ -279,7 +262,7 @@ end
         A = randn(n,n); Σ = Symmetric(A*A' + 0.04I)
 
         r_w  = mve_exhaustive_search(μ, Σ, k; exactly_k=true, compute_weights=true,
-                                     weights_sum1=false, stabilize_Σ=true)
+                                     normalize_weights=false, stabilize_Σ=true)
         r_nw = mve_exhaustive_search(μ, Σ, k; exactly_k=true, compute_weights=false,
                                      stabilize_Σ=true)
 

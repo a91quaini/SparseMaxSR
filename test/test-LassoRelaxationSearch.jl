@@ -1,9 +1,9 @@
 # test/test-LassoRelaxationSearch.jl
 # Fully revised tests for LassoRelaxationSearch to match current semantics:
-#  • weights_sum1=true → absolute-sum normalization (|sum(w)| ≈ 1) — never classic budget with sum(w)=1.
-#  • use_refit=true    → selection by lasso, then MVE refit on that selection; weights_sum1 only rescales; SR invariant.
-#  • use_refit=false   → "normalize-coeffs" branch. May return :LASSO_ALLEMPTY if effective sum is ~0.
-#  • Do not require cross-problem equalities when budgets/normalizations differ; check invariants *within* a solution.
+#  • normalize_weights=true → rescale via Utils.normalize_weights (relative L1 safeguard).
+#  • use_refit=true        → selection by lasso, then MVE refit on that selection; normalization only rescales; SR invariant.
+#  • use_refit=false       → "normalize-coeffs" branch using Utils.normalize_weights; may return :LASSO_ALLEMPTY.
+#  • Do not require cross-problem equalities when normalizations differ; check invariants *within* a solution.
 #  • Realistic tolerances (no atol=rtol=0). Guard divisions by tiny sums.
 #  • Unique helper names to avoid cross-file redefinition warnings.
 #
@@ -61,7 +61,7 @@ const ATOL_SUM = 1e-10
                     R; k=k, nlambda=100, lambda_min_ratio=1e-3,
                     alpha=α, standardize=false,
                     epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
-                    compute_weights=true, use_refit=true, do_checks=true, weights_sum1=false
+                    compute_weights=true, use_refit=true, do_checks=true, normalize_weights=false
                 )
                 @test issorted(sel_r) && length(sel_r) ≤ k
                 @test length(w_r) == N && all(iszero, w_r[setdiff(1:N, sel_r)])
@@ -80,18 +80,18 @@ const ATOL_SUM = 1e-10
                 @test all(iszero, w_r0)
                 @test isfinite(sr_r0) || sr_r0 == 0.0
 
-                # weights_sum1=true only rescales; SR invariant; selection unchanged
+                # normalize_weights=true only rescales; SR invariant; selection unchanged
                 sel_r1, w_r1, sr_r1, st_r1 = mve_lasso_relaxation_search(
                     R; k=k, nlambda=100, lambda_min_ratio=1e-3,
                     alpha=α, standardize=false,
                     epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
-                    compute_weights=true, use_refit=true, do_checks=true, weights_sum1=true
+                    compute_weights=true, use_refit=true, do_checks=true, normalize_weights=true
                 )
                 @test sel_r1 == sel_r && st_r1 == st_r
                 @test isapprox(sr_r1, sr_r; atol=ATOL_SR, rtol=0)
                 if !all(iszero, w_r)
-                    @test abs(abs_sum(w_r1) - 1.0) ≤ ATOL_SUM
-                    @test norm(w_r1 - (w_r / max(abs_sum(w_r), eps()))) ≤ ATOL_W
+                    denom = max(abs(sum(w_r)), 1e-6 * norm(w_r, 1), 1e-10)
+                    @test isapprox.(w_r1, w_r ./ denom; atol=ATOL_W) |> all
                 end
 
                 # ---------------- Normalize-coeffs branch ----------------
@@ -99,7 +99,7 @@ const ATOL_SUM = 1e-10
                     R; k=k, nlambda=100, lambda_min_ratio=1e-3,
                     alpha=α, standardize=false,
                     epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
-                    compute_weights=true, use_refit=false, do_checks=true, weights_sum1=false
+                    compute_weights=true, use_refit=false, do_checks=true, normalize_weights=false
                 )
                 _check_normbranch(sel_n0, w_n0, sr_n0, st_n0; N=N, k=k)
 
@@ -107,16 +107,16 @@ const ATOL_SUM = 1e-10
                     R; k=k, nlambda=100, lambda_min_ratio=1e-3,
                     alpha=α, standardize=false,
                     epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
-                    compute_weights=true, use_refit=false, do_checks=true, weights_sum1=true
+                    compute_weights=true, use_refit=false, do_checks=true, normalize_weights=true
                 )
                 _check_normbranch(sel_n1, w_n1, sr_n1, st_n1; N=N, k=k)
 
-                # If both are not ALLEMPTY and sum(w_n0) is not tiny, weights_sum1 should just rescale
+                # If both are not ALLEMPTY and sum(w_n0) is not tiny, normalize_weights should just rescale
                 if st_n0 != :LASSO_ALLEMPTY && st_n1 != :LASSO_ALLEMPTY && abs_sum(w_n0) > 1e-12
                     @test sel_n0 == sel_n1
                     @test isapprox(sr_n0, sr_n1; atol=ATOL_SR, rtol=0)
-                    @test abs(abs_sum(w_n1) - 1.0) ≤ ATOL_SUM
-                    @test norm(w_n1 - (w_n0 / abs_sum(w_n0))) ≤ ATOL_W
+                    denom = max(abs(sum(w_n0)), 1e-6 * norm(w_n0, 1), 1e-10)
+                    @test isapprox.(w_n1, w_n0 ./ denom; atol=ATOL_W) |> all
                     # SR consistency from recomputation
                     μ = vec(mean(R, dims=1))
                     Σ = _sym(cov(R; corrected=true))
@@ -166,7 +166,7 @@ end
                     μ, Σ, T; k=k, nlambda=100, lambda_min_ratio=1e-3,
                     alpha=α, standardize=false,
                     epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
-                    compute_weights=true, use_refit=true, do_checks=true, weights_sum1=false
+                    compute_weights=true, use_refit=true, do_checks=true, normalize_weights=false
                 )
                 @test issorted(sel_r0) && length(sel_r0) ≤ k
                 @test length(w_r0) == N && all(iszero, w_r0[setdiff(1:N, sel_r0)])
@@ -177,13 +177,13 @@ end
                     μ, Σ, T; k=k, nlambda=100, lambda_min_ratio=1e-3,
                     alpha=α, standardize=false,
                     epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
-                    compute_weights=true, use_refit=true, do_checks=true, weights_sum1=true
+                    compute_weights=true, use_refit=true, do_checks=true, normalize_weights=true
                 )
                 @test sel_r1 == sel_r0 && st_r1 == st_r0
                 @test isapprox(sr_r1, sr_r0; atol=ATOL_SR, rtol=0)
                 if !all(iszero, w_r0)
-                    @test abs(abs_sum(w_r1) - 1.0) ≤ ATOL_SUM
-                    @test norm(w_r1 - (w_r0 / max(abs_sum(w_r0), eps()))) ≤ ATOL_W
+                    denom = max(abs(sum(w_r0)), 1e-6 * norm(w_r0, 1), 1e-10)
+                    @test isapprox.(w_r1, w_r0 ./ denom; atol=ATOL_W) |> all
                 end
 
                 # Normalize branch
@@ -191,7 +191,7 @@ end
                     μ, Σ, T; k=k, nlambda=100, lambda_min_ratio=1e-3,
                     alpha=α, standardize=false,
                     epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
-                    compute_weights=true, use_refit=false, do_checks=true, weights_sum1=false
+                    compute_weights=true, use_refit=false, do_checks=true, normalize_weights=false
                 )
                 _check_normbranch(sel_n0, w_n0, sr_n0, st_n0; N=N, k=k)
 
@@ -199,15 +199,15 @@ end
                     μ, Σ, T; k=k, nlambda=100, lambda_min_ratio=1e-3,
                     alpha=α, standardize=false,
                     epsilon=SparseMaxSR.EPS_RIDGE, stabilize_Σ=true,
-                    compute_weights=true, use_refit=false, do_checks=true, weights_sum1=true
+                    compute_weights=true, use_refit=false, do_checks=true, normalize_weights=true
                 )
                 _check_normbranch(sel_n1, w_n1, sr_n1, st_n1; N=N, k=k)
 
                 if st_n0 != :LASSO_ALLEMPTY && st_n1 != :LASSO_ALLEMPTY && abs_sum(w_n0) > 1e-12
                     @test sel_n0 == sel_n1
                     @test isapprox(sr_n0, sr_n1; atol=ATOL_SR, rtol=0)
-                    @test abs(abs_sum(w_n1) - 1.0) ≤ ATOL_SUM
-                    @test norm(w_n1 - (w_n0 / abs_sum(w_n0))) ≤ ATOL_W
+                    denom = max(abs(sum(w_n0)), 1e-6 * norm(w_n0, 1), 1e-10)
+                    @test isapprox.(w_n1, w_n0 ./ denom; atol=ATOL_W) |> all
                     @test abs(_sr_exact_lasso(w_n0, μ, Σ) - sr_n0) ≤ 1e-9
                     @test abs(_sr_exact_lasso(w_n1, μ, Σ) - sr_n1) ≤ 1e-9
                 end
@@ -256,7 +256,7 @@ end
         @test all(iszero, w2)
         @test sr2 == 0.0
     else
-        # If weights_sum1=true is used, |sum(w)|≈1; otherwise no requirement on the sum.
+        # If normalize_weights=true is used, weights are rescaled; otherwise no requirement on the sum.
         # Here we didn't set it, so we only check finiteness.
         @test isfinite(sr2) || sr2 == 0.0
     end

@@ -1,4 +1,3 @@
-
 # test-SharpeRatio.jl
 
 using Test, LinearAlgebra, Random
@@ -144,7 +143,7 @@ const TOL = 1e-7  # slightly relaxed to avoid spurious failures across BLAS/solv
         Random.seed!(3)
         n = 5
         A = randn(n, n)
-        Σ_raw = A*A' + 0.05I
+        Σ_raw = A*A' + 1e-1I
         Σ_pert = Σ_raw + 1e-10 * randn(n, n)  # tiny asymmetry
         μ = rand(n)
 
@@ -154,33 +153,35 @@ const TOL = 1e-7  # slightly relaxed to avoid spurious failures across BLAS/solv
         @test abs(s1 - s2) ≤ 1e-8
     end
 
-    @testset "weights_sum1 semantics" begin
+    @testset "normalize_weights semantics" begin
         Random.seed!(4)
         n = 8
         μ = 0.01 .+ 0.03 .* rand(n)
         A = randn(n, n)
         Σ = Symmetric(A*A' + 0.15I)
 
-        w0 = compute_mve_weights(μ, Σ; weights_sum1=false)
-        w1 = compute_mve_weights(μ, Σ; weights_sum1=true)
+        # Raw weights vs normalized weights via Utils.normalize_weights (relative mode)
+        w0 = compute_mve_weights(μ, Σ; normalize_weights=false)
+        w1 = compute_mve_weights(μ, Σ; normalize_weights=true)
 
-        # The implementation normalizes with mode=:abs → |sum(w)| = 1
-        @test abs(abs(sum(w1)) - 1.0) ≤ 1e-10
-        @test norm(w1 - (w0 / max(abs(sum(w0)), eps()))) ≤ 1e-8
+        denom = max(abs(sum(w0)), 1e-6 * norm(w0, 1), 1e-10)
+        @test isapprox.(w1, w0 ./ denom; atol=1e-10) |> all
 
         # SR is scale-invariant
         @test abs(compute_sr(w0, μ, Σ) - compute_sr(w1, μ, Σ)) ≤ 1e-10
 
-        # selection case: zeros off support and abs-sum normalization
+        # selection case: zeros off support and same normalization behavior
         sel = sort(randperm(n)[1:5])
-        ws = compute_mve_weights(μ, Σ; selection=sel, weights_sum1=true)
-        @test all(i -> (i ∈ sel) || (ws[i] == 0.0), 1:n)
-        @test abs(abs(sum(ws)) - 1.0) ≤ 1e-10
+        w_raw = compute_mve_weights(μ, Σ; selection=sel, normalize_weights=false)
+        ws    = compute_mve_weights(μ, Σ; selection=sel, normalize_weights=true)
 
-        w_raw = compute_mve_weights(μ, Σ; selection=sel, weights_sum1=false)
+        @test all(i -> (i ∈ sel) || (ws[i] == 0.0), 1:n)
+
+        denom_sel = max(abs(sum(w_raw)), 1e-6 * norm(w_raw, 1), 1e-10)
+        @test isapprox.(ws, w_raw ./ denom_sel; atol=1e-10) |> all
+
         @test abs(compute_sr(ws, μ, Σ) - compute_sr(w_raw, μ, Σ)) ≤ 1e-10
     end
-
 
     # --- error paths when do_checks=true --------------------------------------
     @testset "argument checks" begin

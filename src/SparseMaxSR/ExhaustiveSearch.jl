@@ -4,11 +4,9 @@ module ExhaustiveSearch
 using Random
 using LinearAlgebra
 using Statistics
-using Combinatorics: combinations
-
-# Use SharpeRatio utilities + Utils
-import ..SharpeRatio: compute_mve_sr, compute_mve_weights
-import ..Utils: EPS_RIDGE, _prep_S
+using Combinatorics: combinations, binomial
+using ..Utils
+using ..SharpeRatio
 
 export mve_exhaustive_search
 
@@ -89,7 +87,7 @@ function sample_and_score_best!(
         return best_sr, best_sel
     else
         # tuple fallback for large n
-        seen = Set{NTuple{N,Int}}() where {N}
+        seen = Set{Tuple{Vararg{Int}}}()
         buf  = Vector{Int}(undef, k)
         best_sr  = -Inf
         best_sel = Vector{Int}()
@@ -121,12 +119,12 @@ end
         exactly_k=true,
         max_samples_per_k=0,
         max_combinations::Int=10_000_000,
-        epsilon=EPS_RIDGE,
+        epsilon=Utils.EPS_RIDGE,
         rng=Random.default_rng(),
         γ=1.0,
         stabilize_Σ = true,
         compute_weights::Bool=false,
-        weights_sum1::Bool=false,
+        normalize_weights::Bool=false,
         do_checks=false,
     ) -> NamedTuple{(:selection, :weights, :sr, :status)}
 
@@ -142,9 +140,9 @@ If `max_samples_per_k > 0`, the method samples up to `max_samples_per_k` support
 for each size (also bounded above by the number of available combinations).
 
 If `compute_weights=true`, the returned weights are computed via
-`compute_mve_weights(...; selection=best_set, weights_sum1=weights_sum1)`.
+`SharpeRatio.compute_mve_weights(...; selection=best_set, normalize_weights=normalize_weights)`.
 Note that the reported Sharpe ratio is scale-invariant and does not depend on
-`weights_sum1`.
+`normalize_weights`.
 
 The returned `status` is `:EXHAUSTIVE` if all intended supports were fully
 enumerated, and `:EXHAUSTIVE_SAMPLED` if any size was truncated or sampled.
@@ -159,18 +157,18 @@ function mve_exhaustive_search(
     exactly_k::Bool = true,
     max_samples_per_k::Int = 0,
     max_combinations::Int = 10_000_000,
-    epsilon::Real = EPS_RIDGE,
+    epsilon::Real = Utils.EPS_RIDGE,
     rng::AbstractRNG = Random.default_rng(),
     γ::Real = 1.0,
     stabilize_Σ::Bool = true,
     compute_weights::Bool=false,
-    weights_sum1::Bool=false,
+    normalize_weights::Bool=false,
     do_checks::Bool = false,
 )
     # --- input checks ---
     n = length(μ)
     if do_checks
-        size(Σ,1) == n && size(Σ,2) == n || error("Σ must be n×n with n = length(μ).")
+        size(Σ,1) == n && size(Σ,2) == n   || error("Σ must be n×n with n = length(μ).")
         1 ≤ k ≤ n                          || error("k must satisfy 1 ≤ k ≤ n.")
         max_samples_per_k ≥ 0              || error("max_samples_per_k must be ≥ 0.")
         max_combinations > 0               || error("max_combinations must be > 0.")
@@ -180,7 +178,7 @@ function mve_exhaustive_search(
     end
 
     # --- Stabilize Σ once (or just symmetrize if stabilize_Σ=false) ---
-    Σs = stabilize_Σ ? _prep_S(Σ, epsilon, true) : Symmetric((Σ + Σ')/2)
+    Σs = stabilize_Σ ? Utils._prep_S(Σ, epsilon, true) : Symmetric((Σ + Σ')/2)
 
     nrange = 1:n
     best_sr  = -Inf
@@ -188,7 +186,7 @@ function mve_exhaustive_search(
     fully_enumerated = true
 
     # scorer closure
-    scorer = sel -> compute_mve_sr(μ, Σs;
+    scorer = sel -> SharpeRatio.compute_mve_sr(μ, Σs;
                                    selection=sel,
                                    epsilon=epsilon,
                                    stabilize_Σ=false,
@@ -268,9 +266,9 @@ function mve_exhaustive_search(
     # Compute weights for the best selection (full-length, zeros elsewhere)
     best_w = (isempty(best_set) || !compute_weights) ?
         zeros(Float64, n) :
-        compute_mve_weights(μ, Σs;
+        SharpeRatio.compute_mve_weights(μ, Σs;
             selection=best_set,
-            weights_sum1=weights_sum1,
+            normalize_weights=normalize_weights,
             epsilon=epsilon,
             stabilize_Σ=false,
             do_checks=false)

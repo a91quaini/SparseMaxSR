@@ -61,72 +61,63 @@ end
     @test isapprox(Matrix(S3), Matrix(T3); rtol=1e-12, atol=1e-12)
 end
 
-@testset "Utils.make_weights_sum1 basic scaling (:sum)" begin
-    w = [0.2, -0.1, 0.3] # sum = 0.4
-    w1, status, s = U.make_weights_sum1(w; target=1.0, mode=:sum, do_checks=true)
-    @test status == :OK
-    @test isapprox(s, 0.4; atol=1e-15)
+# ──────────────────────────────────────────────────────────────────────────────
+# normalize_weights tests (replacing make_weights_sum1)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@testset "Utils.normalize_weights :absolute basic scaling" begin
+    # sum = 0.4 → denom = 0.4 → abs(sum(w_norm)) ≈ 1
+    w = [0.2, -0.1, 0.3]
+    w1 = U.normalize_weights(w; mode=:absolute, do_checks=true)
     @test isapprox(sum(w1), 1.0; atol=1e-12)
-    # scaling factor should be 2.5
-    @test isapprox.(w1, w .* 2.5) |> all
+    @test isapprox.(w1, w .* (1/0.4)) |> all  # scaling factor 2.5
 end
 
-@testset "Utils.make_weights_sum1 absolute-sum normalization (:abs)" begin
-    # Negative sum → preserve sign after scaling
-    wneg = [-1.0, -1.0] # sum = -2
-    w2, status2, s2 = U.make_weights_sum1(wneg; target=1.0, mode=:abs, do_checks=true)
-    @test status2 == :OK
+@testset "Utils.normalize_weights :relative behaves like :absolute when |s| dominates tol*||w||₁" begin
+    w = [0.2, -0.1, 0.3]  # |s|=0.4, ||w||₁=0.6 → tol*||w||₁=6e-7 << 0.4
+    wr = U.normalize_weights(w; mode=:relative, do_checks=true)
+    @test isapprox(sum(wr), 1.0; atol=1e-12)
+    @test isapprox.(wr, w .* (1/0.4)) |> all
+end
+
+@testset "Utils.normalize_weights sign preservation and negative sums (:absolute)" begin
+    wneg = [-1.0, -1.0]  # sum = -2 → denom=2 → sum(w_norm) ≈ -1
+    w2 = U.normalize_weights(wneg; mode=:absolute, do_checks=true)
     @test isapprox(abs(sum(w2)), 1.0; atol=1e-12)
-    @test sum(w2) < 0 # sign preserved
-
-    # Positive sum → preserve positive sign
-    wpos = [0.3, 0.7] # sum = 1.0
-    w3, status3, s3 = U.make_weights_sum1(wpos; target=2.0, mode=:abs, do_checks=true)
-    @test status3 == :OK
-    @test isapprox(abs(sum(w3)), 2.0; atol=1e-12)
-    @test sum(w3) > 0
+    @test sum(w2) < 0  # sign preserved
 end
 
-@testset "Utils.make_weights_sum1 near-zero/degenerate sums" begin
-    # Sum ~ 0 → ZERO_SUM and zeros vector
-    w = [1e-10, -1e-10]
-    w0, st, s = U.make_weights_sum1(w; target=1.0, mode=:sum)  # default tol=1e-7
-    @test st == :ZERO_SUM
-    @test sum(abs, w0) == 0.0
-
-    # Non-finite or non-positive target without checks → ZERO_SUM branch
-    w = [0.4, 0.6]
-    w_bad, st_bad, s_bad = U.make_weights_sum1(w; target=NaN, mode=:sum, do_checks=false)
-    @test st_bad == :ZERO_SUM
-    @test sum(abs, w_bad) == 0.0
-
-    w_bad2, st_bad2, _ = U.make_weights_sum1(w; target=-1.0, mode=:sum, do_checks=false)
-    @test st_bad2 == :ZERO_SUM
-    @test sum(abs, w_bad2) == 0.0
+@testset "Utils.normalize_weights near-zero sums produce finite outputs" begin
+    # sum ≈ 0 → denom = max(|s|, tol*||w||₁, 1e-10) = 1e-10 (floor)
+    wsmall = [1e-10, -1e-10]
+    w0 = U.normalize_weights(wsmall; mode=:relative)  # default tol=1e-6
+    @test all(isfinite, w0)
+    # Check that scaling matches definition
+    denom = max(abs(sum(wsmall)), 1e-6 * norm(wsmall, 1), 1e-10)
+    @test isapprox.(w0, wsmall ./ denom) |> all
 end
 
-@testset "Utils.make_weights_sum1 input validation with do_checks=true" begin
+@testset "Utils.normalize_weights input validation with do_checks=true" begin
     w = [0.2, 0.3, 0.5]
 
     # Invalid mode
-    @test_throws ErrorException U.make_weights_sum1(w; mode=:foo, do_checks=true)
+    @test_throws ErrorException U.normalize_weights(w; mode=:foo, do_checks=true)
 
     # Non-finite weights
     wnf = [0.1, NaN, 0.2]
-    @test_throws ErrorException U.make_weights_sum1(wnf; do_checks=true)
+    @test_throws ErrorException U.normalize_weights(wnf; do_checks=true)
 
-    # Non-finite target
-    @test_throws ErrorException U.make_weights_sum1(w; target=Inf, do_checks=true)
+    # Non-finite tol
+    @test_throws ErrorException U.normalize_weights(w; tol=Inf, do_checks=true)
 
-    # Non-positive target
-    @test_throws ErrorException U.make_weights_sum1(w; target=0.0, do_checks=true)
+    # Non-positive tol
+    @test_throws ErrorException U.normalize_weights(w; tol=0.0, do_checks=true)
 end
 
-@testset "Utils.make_weights_sum1 idempotence under correct target" begin
-    # If sum(w) already equals target and mode=:sum, output equals input
-    w = [0.25, 0.25, 0.5]
-    w1, st, s = U.make_weights_sum1(w; target=1.0, mode=:sum, do_checks=true)
-    @test st == :OK
+@testset "Utils.normalize_weights idempotence when sum(w)=1 (:absolute)" begin
+    # If sum(w)=1 and :absolute, denominator=1 → output equals input
+    w = [0.25, 0.25, 0.5]   # sum = 1
+    w1 = U.normalize_weights(w; mode=:absolute, do_checks=true)
     @test isapprox(sum(w1), 1.0; atol=1e-12)
-    @test isapprox.(w1, w) |> all
+    @test isapprox.(w1, w; atol=1e-12) |> all
 end

@@ -2,7 +2,7 @@ module SharpeRatio
 
 using LinearAlgebra
 using Statistics
-import ..Utils: EPS_RIDGE, _prep_S, make_weights_sum1
+using ..Utils
 
 export compute_sr,
        compute_mve_sr,
@@ -34,7 +34,7 @@ end
 
 """
     compute_sr(weights, μ, Σ;
-               selection=Int[], epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=false) -> Float64
+               selection=Int[], epsilon=Utils.EPS_RIDGE, stabilize_Σ=true, do_checks=false) -> Float64
 
 Compute the Sharpe ratio of a given portfolio:
 
@@ -56,7 +56,7 @@ function compute_sr(
     μ::AbstractVector{<:Real},
     Σ::AbstractMatrix{<:Real};
     selection::AbstractVector{<:Integer}=Int[],
-    epsilon::Real=EPS_RIDGE,
+    epsilon::Real=Utils.EPS_RIDGE,
     stabilize_Σ::Bool=true,
     do_checks::Bool=false
 )::Float64
@@ -70,7 +70,7 @@ function compute_sr(
         isfinite(epsilon) || error("epsilon must be finite.")
     end
 
-    Σeff = _prep_S(Σ, epsilon, stabilize_Σ)
+    Σeff = Utils._prep_S(Σ, epsilon, stabilize_Σ)
 
     if isempty(selection) || length(selection) == n
         num = dot(weights, μ)
@@ -94,7 +94,7 @@ end
 
 """
     compute_mve_sr(μ, Σ;
-                   selection=Int[], epsilon=EPS_RIDGE, stabilize_Σ=true, do_checks=false) -> Float64
+                   selection=Int[], epsilon=Utils.EPS_RIDGE, stabilize_Σ=true, do_checks=false) -> Float64
 
 Compute the **maximum Sharpe ratio** achievable over a subset of assets:
 
@@ -112,7 +112,7 @@ function compute_mve_sr(
     μ::AbstractVector{<:Real},
     Σ::AbstractMatrix{<:Real};
     selection::AbstractVector{<:Integer}=Int[],
-    epsilon::Real=EPS_RIDGE,
+    epsilon::Real=Utils.EPS_RIDGE,
     stabilize_Σ::Bool=true,
     do_checks::Bool=false
 )::Float64
@@ -125,7 +125,7 @@ function compute_mve_sr(
         isfinite(epsilon) || error("epsilon must be finite.")
     end
 
-    Σeff = _prep_S(Σ, epsilon, stabilize_Σ)
+    Σeff = Utils._prep_S(Σ, epsilon, stabilize_Σ)
 
     if isempty(selection) || length(selection) == n
         μs = μ
@@ -145,8 +145,8 @@ end
 """
     compute_mve_weights(μ, Σ;
                         selection=Int[],
-                        weights_sum1::Bool=false,
-                        epsilon::Real=EPS_RIDGE,
+                        normalize_weights::Bool=false,
+                        epsilon::Real=Utils.EPS_RIDGE,
                         stabilize_Σ::Bool=true,
                         do_checks::Bool=false) -> Vector{Float64}
 
@@ -154,26 +154,17 @@ Compute **mean–variance efficient (MVE) portfolio weights**:
 
     w = Σ^{-1} μ
 
-If `weights_sum1=true`, the weights are renormalized so that `|sum(w)| = 1`.
-
-# Arguments
-- `μ`: mean vector of excess returns (length n).
-- `Σ`: covariance matrix (n×n).
-- `selection`: optional subset of indices; other positions are set to zero.
-- `weights_sum1`: if true, normalize weights to make `|sum(w)|=1`.
-- `epsilon`: ridge stabilization parameter for Σ.
-- `stabilize_Σ`: symmetrize and ridge-stabilize Σ before inversion.
-- `do_checks`: input validation (dimensions, finiteness, etc.).
-
-# Returns
-A length-n vector of MVE weights.
+If `normalize_weights=true`, the returned vector is post-processed with
+`Utils.normalize_weights(w; mode=:relative, tol=1e-6, do_checks=false)`, i.e.,
+relative L1 normalization with a small safeguard.
+This does **not** affect Sharpe ratios (scale-invariant).
 """
 function compute_mve_weights(
     μ::AbstractVector{<:Real},
     Σ::AbstractMatrix{<:Real};
     selection::AbstractVector{<:Integer}=Int[],
-    weights_sum1::Bool=false,
-    epsilon::Real=EPS_RIDGE,
+    normalize_weights::Bool=false,
+    epsilon::Real=Utils.EPS_RIDGE,
     stabilize_Σ::Bool=true,
     do_checks::Bool=false
 )::Vector{Float64}
@@ -187,7 +178,7 @@ function compute_mve_weights(
         isfinite(epsilon) || error("epsilon must be finite.")
     end
 
-    Σeff = _prep_S(Σ, epsilon, stabilize_Σ)
+    Σeff = Utils._prep_S(Σ, epsilon, stabilize_Σ)
 
     # Compute Σ^{-1} μ (possibly on restricted support)
     if isempty(selection) || length(selection) == n
@@ -201,14 +192,12 @@ function compute_mve_weights(
         @inbounds w[sel] .= ws
     end
 
-    # Optional normalization to make weights sum to 1
-    if weights_sum1
-        # Classic budget: sum(w) = 1
-        w, _, _ = make_weights_sum1(w; mode=:abs)
+    # Optional normalization using the new utility (defaults: :relative, 1e-6, false)
+    if normalize_weights
+        w = Utils.normalize_weights(w)  # uses the default mode/tol/checks you defined
     end
 
     return w
 end
-
 
 end # module

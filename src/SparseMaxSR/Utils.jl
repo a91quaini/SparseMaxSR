@@ -25,46 +25,54 @@ const EPS_RIDGE = 1e-6
 end
 
 """
-    make_weights_sum1(w::AbstractVector;
-                      target::Real=1.0,
-                      mode::Symbol=:sum,
-                      tol::Real=1e-7,
-                      do_checks::Bool=false) -> (w_norm::Vector{Float64}, status::Symbol, s::Float64)
+    normalize_weights(w::AbstractVector;
+                      mode::Symbol = :relative,
+                      tol::Real = 1e-6,
+                      do_checks::Bool = false) -> Vector{Float64}
 
-Return a **rescaled copy** of `w` so that:
-- `mode = :sum`  →  `sum(w_norm) = target`
-- `mode = :abs`  →  `abs(sum(w_norm)) = target` (sign of `sum(w)` is preserved)
+Normalize a vector of portfolio weights so that its absolute sum is approximately equal to 1.
 
-If `abs(sum(w)) ≤ tol`, returns `zeros(length(w))` and `status = :ZERO_SUM`.
-Otherwise returns the rescaled vector and `status = :OK`.
+The vector `w` is rescaled according to the specified normalization `mode`:
 
-`target` is positive in both modes.
+- `mode = :absolute`:
+    Divides `w` by `max(abs(sum(w)), tol, 1e-10)`.
+    This ensures the **absolute sum** of the resulting weights equals 1 (up to tolerance).
+
+- `mode = :relative` (default):
+    Divides `w` by `max(abs(sum(w)), tol * norm(w, 1), 1e-10)`.
+    This rescales weights **relative to their L1 norm**, improving stability when the sum of weights is near zero
+    but individual elements are not negligible.
+
+Optional argument checks (`do_checks = true`) ensure:
+- `mode` is either `:absolute` or `:relative`;
+- all elements of `w` are finite;
+- `tol` is positive and finite.
+
+Always returns a finite `Vector{Float64}` of the same length as `w`.
 """
-function make_weights_sum1(w::AbstractVector;
-                           target::Real=1.0,
-                           mode::Symbol=:sum,
-                           tol::Real=1e-7,
-                           do_checks::Bool=false)
+function normalize_weights(w::AbstractVector;
+                           mode::Symbol = :relative,
+                           tol::Real = 1e-6,
+                           do_checks::Bool = false)::Vector{Float64}
     s = sum(w)
+
     if do_checks
-        (mode === :sum || mode === :abs) ||
-            error("make_weights_sum1: mode must be :sum or :abs (got $mode)")
-        isfinite(target)      || error("target must be finite.")
-        target > 0            || error("target must be positive.")
-        all(isfinite, w)      || error("weights must be finite.")
+        (mode === :absolute || mode === :relative) ||
+            error("normalize_weights: mode must be :absolute or :relative (got $mode)")
+        all(isfinite, w) || error("weights must be finite.")
+        isfinite(tol) || error("tol must be finite.")
+        tol > 0 || error("tol must be positive.")
     end
 
-    if !isfinite(s) || abs(s) ≤ tol || !isfinite(target) || target ≤ 0
-        return zeros(Float64, length(w)), :ZERO_SUM, s
-    end
-    scale = if mode === :sum
-        target / s
+    denom = if mode === :absolute
+        max(abs(s), tol, 1e-10)
     else
-        (sign(s) * target) / s
+        max(abs(s), tol * norm(w, 1), 1e-10)
     end
-    return Float64.(w .* scale), :OK, s
+
+    return Float64.(w ./ denom)
 end
 
-export EPS_RIDGE, _prep_S, make_weights_sum1
+export EPS_RIDGE, _prep_S, normalize_weights
 
 end # module

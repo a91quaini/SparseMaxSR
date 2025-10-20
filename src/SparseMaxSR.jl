@@ -1,11 +1,7 @@
-
 module SparseMaxSR
 
 # Top-level module wiring for SparseMaxSR.
 # Includes submodules and re-exports the public API.
-
-using LinearAlgebra, Statistics, Random
-using JuMP
 
 # --- Include submodules ---
 include("SparseMaxSR/Utils.jl")

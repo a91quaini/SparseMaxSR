@@ -268,10 +268,3 @@ julia --project=. example.jl
 It prints Sharpe ratios and timing for each k grid.
 
 ---
-
-## Version notes
-
-- **Normalization**: budget constraint optional via `weights_sum1` → internally calls `Utils.normalize_weights`.  
-- **MIQP defaults**: `time_limit=200`, `expand_rounds=20`, `expand_factor=3.0`, `expand_tol=1e-2`, `exactly_k=false`, `m=max(0,k-1)`.  
-- **LASSO defaults**: `lambda_min_ratio=1e-3`, `alpha=0.95`.  
-- **Ridge stabilization**: controlled by global constant `EPS_RIDGE`.

@@ -314,11 +314,3 @@ k      | EXHAUSTIVE         | LASSO‑VANILLA      | LASSO‑REFIT        | MIQP
 
 ---
 
-## 7. References
-
-- Markowitz (1952): *Portfolio Selection*.  
-- Brodie et al. (2009): *Sparse Portfolio Selection via LASSO*.  
-- Bertsimas & King (2016): *OR Methods in Portfolio Optimization*.  
-- Quaini (2025): *Sparse Maximum‑Sharpe Heuristics in Julia* (forthcoming).
-
----

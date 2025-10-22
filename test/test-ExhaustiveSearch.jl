@@ -1,14 +1,12 @@
-# test-ExhaustiveSearch.jl — tests for mve_exhaustive_search & mve_exhaustive_search_gridk
+# test-ExhaustiveSearch.jl — tests for mve_exhaustive_search (NamedTuple API)
 #
 # New API under test:
 #   mve_exhaustive_search(μ::AbstractVector, Σ::AbstractMatrix; k::Int;
 #                         epsilon=..., stabilize_Σ=..., do_checks=...,
 #                         enumerate_all::Bool=true, max_samples::Int=0,
-#                         dedup_samples::Bool=true, rng=Random.GLOBAL_RNG)
-#       -> (selection::Vector{Int}, sr::Float64)
-#
-#   mve_exhaustive_search_gridk(μ, Σ, k_grid; kwargs...) 
-#       -> Dict{Int, Tuple{Vector{Int}, Float64}}
+#                         dedup_samples::Bool=true, rng=Random.GLOBAL_RNG,
+#                         compute_weights::Bool=true)
+#       -> NamedTuple{(:selection, :weights, :sr, :status)}
 #
 using Test, Random, LinearAlgebra, Statistics
 using SparseMaxSR
@@ -39,6 +37,12 @@ function _bruteforce_best_sr(μ, Σ; s::Int, epsilon=0.0, stabilize_Σ=true)
     return best_set, best_sr
 end
 
+# Sum of absolute weights off-support (should be ~0 for exact-support solvers)
+function _offsupport_l1(w::AbstractVector, sel::AbstractVector, n::Int)
+    offs = setdiff(1:n, sel)
+    return sum(abs, @view w[offs])
+end
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Tests for mve_exhaustive_search
 # ──────────────────────────────────────────────────────────────────────────────
@@ -53,16 +57,19 @@ end
 
         brute_set, brute_sr = _bruteforce_best_sr(μ, Σ; s=k, epsilon=0.0, stabilize_Σ=true)
 
-        sel, sr = mve_exhaustive_search(μ, Σ; 
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
-            do_checks    = true,
+        res = mve_exhaustive_search(μ, Σ; 
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
+            do_checks     = true,
             enumerate_all = true)
 
-        @test length(sel) == k
-        @test sel == brute_set
-        @test isapprox(sr, brute_sr; atol=1e-12, rtol=0)
+        @test res.status == :EXHAUSTIVE
+        @test length(res.selection) == k
+        @test res.selection == brute_set
+        @test isapprox(res.sr, brute_sr; atol=1e-12, rtol=0)
+        @test length(res.weights) == n
+        @test _offsupport_l1(res.weights, res.selection, n) ≤ 1e-12
     end
 
     @testset "sampled mode equals exhaustive when sample cap ≥ total" begin
@@ -71,21 +78,25 @@ end
         μ = 0.02 .+ 0.03 .* rand(n)
         A = randn(n,n); Σ = Symmetric(A*A' + 0.03I)
 
-        sel_exh, sr_exh = mve_exhaustive_search(μ, Σ; 
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        res_exh = mve_exhaustive_search(μ, Σ; 
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = true)
 
-        sel_cap, sr_cap = mve_exhaustive_search(μ, Σ;
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        total = length(collect(combinations(1:n, k)))
+        res_cap = mve_exhaustive_search(μ, Σ;
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = false,
-            max_samples  = 35)  # ≥ total
+            max_samples   = total)
 
-        @test sel_cap == sel_exh
-        @test isapprox(sr_cap, sr_exh; atol=0, rtol=0)
+        @test res_cap.status == :SAMPLED
+        @test res_cap.selection == res_exh.selection
+        @test isapprox(res_cap.sr, res_exh.sr; atol=0, rtol=0)
+        @test length(res_cap.weights) == n
+        @test _offsupport_l1(res_cap.weights, res_cap.selection, n) ≤ 1e-12
     end
 
     @testset "RNG reproducibility in sampled mode" begin
@@ -96,23 +107,27 @@ end
 
         rng1 = MersenneTwister(123)
         rng2 = MersenneTwister(123)
-        s1, r1 = mve_exhaustive_search(μ, Σ;
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        r1 = mve_exhaustive_search(μ, Σ;
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = false,
-            max_samples  = 15,
-            rng          = rng1)
-        s2, r2 = mve_exhaustive_search(μ, Σ;
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+            max_samples   = 15,
+            rng           = rng1)
+        r2 = mve_exhaustive_search(μ, Σ;
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = false,
-            max_samples  = 15,
-            rng          = rng2)
+            max_samples   = 15,
+            rng           = rng2)
 
-        @test s1 == s2
-        @test isapprox(r1, r2; atol=0, rtol=0)
+        @test r1.status == :SAMPLED == r2.status
+        @test r1.selection == r2.selection
+        @test isapprox(r1.sr, r2.sr; atol=0, rtol=0)
+        @test length(r1.weights) == n == length(r2.weights)
+        @test _offsupport_l1(r1.weights, r1.selection, n) ≤ 1e-12
+        @test _offsupport_l1(r2.weights, r2.selection, n) ≤ 1e-12
     end
 
     @testset "k=1 picks asset with highest μ/√σ² for diagonal Σ" begin
@@ -124,16 +139,18 @@ end
         scores = μ ./ sqrt.(diagσ2)
         best = argmax(scores)
 
-        sel, sr = mve_exhaustive_search(μ, Σ;
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        res = mve_exhaustive_search(μ, Σ;
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = true)
 
-        @test sel == [best]
+        @test res.status == :EXHAUSTIVE
+        @test res.selection == [best]
         # sanity: SR equals brute
         _, brute = _bruteforce_best_sr(μ, Σ; s=k, epsilon=0.0, stabilize_Σ=true)
-        @test isapprox(sr, brute; atol=1e-12, rtol=0)
+        @test isapprox(res.sr, brute; atol=1e-12, rtol=0)
+        @test _offsupport_l1(res.weights, res.selection, length(μ)) ≤ 1e-12
     end
 
     @testset "k=n selects all assets; matches global MVE SR" begin
@@ -142,16 +159,18 @@ end
         μ = 0.02 .+ 0.03 .* rand(n)
         A = randn(n,n); Σ = Symmetric(A*A' + 0.05I)
 
-        sel, sr = mve_exhaustive_search(μ, Σ;
-            k            = n,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        res = mve_exhaustive_search(μ, Σ;
+            k             = n,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = true)
 
-        @test sel == collect(1:n)
+        @test res.status == :EXHAUSTIVE
+        @test res.selection == collect(1:n)
 
         mve = compute_mve_sr(μ, Symmetric((Σ + Σ')/2); epsilon=0.0, stabilize_Σ=false)
-        @test isapprox(sr, mve; atol=1e-12, rtol=0)
+        @test isapprox(res.sr, mve; atol=1e-12, rtol=0)
+        @test _offsupport_l1(res.weights, res.selection, n) ≤ 1e-12
     end
 
     @testset "near-singular Σ and epsilon stabilization" begin
@@ -161,35 +180,41 @@ end
         μ = 0.01 .+ 0.01 .* rand(n)
 
         # epsilon > 0 → well-behaved
-        sel_eps, sr_eps = mve_exhaustive_search(μ, Σsing;
-            k            = k,
-            epsilon      = 1e-2,
-            stabilize_Σ  = true,
+        res_eps = mve_exhaustive_search(μ, Σsing;
+            k             = k,
+            epsilon       = 1e-2,
+            stabilize_Σ   = true,
             enumerate_all = true)
-        @test isfinite(sr_eps)
-        @test length(sel_eps) == k
+        @test res_eps.status == :EXHAUSTIVE
+        @test isfinite(res_eps.sr)
+        @test length(res_eps.selection) == k
+        @test _offsupport_l1(res_eps.weights, res_eps.selection, n) ≤ 1e-10
 
         # epsilon = 0 → pseudo-inverse path; should not error
-        sel0, sr0 = mve_exhaustive_search(μ, Σsing;
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        res0 = mve_exhaustive_search(μ, Σsing;
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = true)
-        @test isfinite(sr0)
-        @test length(sel0) == k
+        @test res0.status == :EXHAUSTIVE
+        @test isfinite(res0.sr)
+        @test length(res0.selection) == k
+        @test _offsupport_l1(res0.weights, res0.selection, n) ≤ 1e-10
     end
 
     @testset "ties across supports are handled (identical assets)" begin
         n, k = 5, 2
         μ = fill(0.1, n)
         Σ = Symmetric(Matrix(0.04I, n, n))
-        sel, sr = mve_exhaustive_search(μ, Σ;
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        res = mve_exhaustive_search(μ, Σ;
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = true)
-        @test length(sel) == k
-        @test isfinite(sr)
+        @test res.status == :EXHAUSTIVE
+        @test length(res.selection) == k
+        @test isfinite(res.sr)
+        @test _offsupport_l1(res.weights, res.selection, n) ≤ 1e-12
     end
 
     @testset "argument checks (do_checks=true)" begin
@@ -201,8 +226,28 @@ end
         @test_throws ErrorException mve_exhaustive_search(μ, [NaN 0; 0 1]; k=1, do_checks=true)
         # Sampling knob check (only meaningful for enumerate_all=false)
         @test_throws ErrorException mve_exhaustive_search(μ, Σ; k=1, enumerate_all=false, max_samples=-1, do_checks=true)
-        # Valid when enumerate_all=true (max_samples ignored)
-        @test mve_exhaustive_search(μ, Σ; k=1, enumerate_all=true, max_samples=-1, do_checks=true) isa Tuple
+        # Valid when enumerate_all=true (max_samples ignored); returns NamedTuple
+        @test mve_exhaustive_search(μ, Σ; k=1, enumerate_all=true, max_samples=-1, do_checks=true) isa NamedTuple
+    end
+
+    @testset "compute_weights=false returns zero vector (length N)" begin
+        Random.seed!(77)
+        n, k = 7, 3
+        μ = 0.02 .+ 0.03 .* rand(n)
+        A = randn(n,n); Σ = Symmetric(A*A' + 0.02I)
+
+        res = mve_exhaustive_search(μ, Σ;
+            k               = k,
+            epsilon         = 0.0,
+            stabilize_Σ     = true,
+            enumerate_all   = true,
+            compute_weights = false)
+
+        @test res.status == :EXHAUSTIVE
+        @test length(res.weights) == n
+        @test all(iszero, res.weights)
+        @test isfinite(res.sr)
+        @test length(res.selection) == k
     end
 
     @testset "sampled mode improves with more samples (smoke)" begin
@@ -211,30 +256,26 @@ end
         μ = 0.02 .+ 0.05 .* rand(n)
         A = randn(n,n); Σ = Symmetric(A*A' + 0.10I)
 
-        s_small, r_small = mve_exhaustive_search(μ, Σ;
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        r_small = mve_exhaustive_search(μ, Σ;
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = false,
-            max_samples  = 10,
-            rng          = MersenneTwister(1))
+            max_samples   = 10,
+            rng           = MersenneTwister(1))
 
-        s_big, r_big = mve_exhaustive_search(μ, Σ;
-            k            = k,
-            epsilon      = 0.0,
-            stabilize_Σ  = true,
+        r_big = mve_exhaustive_search(μ, Σ;
+            k             = k,
+            epsilon       = 0.0,
+            stabilize_Σ   = true,
             enumerate_all = false,
-            max_samples  = 60,
-            rng          = MersenneTwister(1))
+            max_samples   = 60,
+            rng           = MersenneTwister(1))
 
-        @test r_big + 1e-12 ≥ r_small
-        @test length(s_small) == k && length(s_big) == k
+        @test r_small.status == :SAMPLED == r_big.status
+        @test r_big.sr + 1e-12 ≥ r_small.sr
+        @test length(r_small.selection) == k && length(r_big.selection) == k
+        @test length(r_small.weights) == n && length(r_big.weights) == n
     end
 end
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Tests for mve_exhaustive_search_gridk
-# ──────────────────────────────────────────────────────────────────────────────
-
-
 

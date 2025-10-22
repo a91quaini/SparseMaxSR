@@ -6,8 +6,7 @@ using Combinatorics     # for combinations(itr, k)
 using ..Utils
 using ..SharpeRatio
 
-export mve_exhaustive_search,
-       mve_exhaustive_search_gridk
+export mve_exhaustive_search
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Overview
@@ -226,36 +225,42 @@ end
                           enumerate_all::Bool = true,
                           max_samples::Int = 0,
                           dedup_samples::Bool = true,
-                          rng::AbstractRNG = Random.GLOBAL_RNG
-                          ) -> (selection::Vector{Int}, sr::Float64)
+                          rng::AbstractRNG = Random.GLOBAL_RNG,
+                          # outputs
+                          compute_weights::Bool = true
+) -> NamedTuple{(:selection, :weights, :sr, :status)}
 
-Return the best k-asset subset (and its in-sample MVE Sharpe ratio) under either
-full enumeration (`enumerate_all=true`) or uniform random sampling over supports
-(`enumerate_all=false`, with `max_samples` draws).
-
-Arguments
----------
-- `μ`, `Σ`          : asset moments (length N, N×N).
-- `k`               : subset size (1 ≤ k ≤ N).
-- `epsilon`         : ridge size used in `Utils._prep_S`.
-- `stabilize_Σ`     : if true, symmetrize and ridge-stabilize Σ before scoring.
-- `do_checks`       : if true, validate inputs (dims, finiteness, ranges).
-- `enumerate_all`   : if true, enumerate all N choose k subsets; else sample.
-- `max_samples`     : number of sampled supports when `enumerate_all=false`.
-- `dedup_samples`   : ensure sampled supports are distinct.
-- `rng`             : RNG used for sampling.
+Search for the best `k`-asset subset maximizing the in-sample MVE Sharpe ratio.
 
 Returns
 -------
-- `selection::Vector{Int}` : the best subset (sorted indices).
-- `sr::Float64`            : the corresponding in-sample MVE Sharpe ratio.
+NamedTuple with fields:
+- `selection::Vector{Int}` — indices of the best subset (sorted).
+- `weights::Vector{Float64}` — MVE weights on that subset (zeros off-support).
+  If `compute_weights=false`, this is `zeros(N)`.
+- `sr::Float64` — in-sample MVE Sharpe ratio for `selection`.
+- `status::Symbol` — `:EXHAUSTIVE` if full enumeration used, `:SAMPLED` if supports were sampled.
+
+Arguments
+---------
+- `μ::AbstractVector{<:Real}`: expected excess returns (length `N`).
+- `Σ::AbstractMatrix{<:Real}`: covariance matrix (`N×N`).
+- `k::Integer`: subset size (`1 ≤ k ≤ N`).
+- `epsilon::Real`: ridge used by `Utils._prep_S` for numerical stability.
+- `stabilize_Σ::Bool`: if true, symmetrize + ridge-stabilize `Σ` before scoring.
+- `do_checks::Bool`: if true, validate inputs (dims, finiteness, ranges).
+- `enumerate_all::Bool`: true → enumerate all `N choose k`; false → sample.
+- `max_samples::Int`: number of supports when `enumerate_all=false` (must be > 0).
+- `dedup_samples::Bool`: ensure sampled supports are distinct (sampling mode).
+- `rng::AbstractRNG`: RNG for sampling mode.
+- `compute_weights::Bool`: if true, compute and return MVE weights; else return zeros(N).
 
 Notes
 -----
-- If `enumerate_all=false` and `max_samples ≤ 0`, the function behaves like
-  enumeration when N choose k is reasonably small; otherwise it throws.
-- All scoring uses a *single* stabilized covariance `Σs` to avoid rework inside
-  loops: `SharpeRatio.compute_mve_sr(μ, Σs; selection, stabilize_Σ=false)`.
+- The covariance is prepared **once** as `Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)` and reused.
+- Sharpe ratios are computed with `SharpeRatio.compute_mve_sr(μ, Σs; selection=..., stabilize_Σ=false)`.
+- Weights (when requested) are computed with the same `Σs` via
+  `SharpeRatio.compute_mve_weights(μ, Σs; selection=..., stabilize_Σ=false, do_checks=false)`.
 """
 function mve_exhaustive_search(
     μ::AbstractVector{<:Real},
@@ -267,14 +272,15 @@ function mve_exhaustive_search(
     enumerate_all::Bool = true,
     max_samples::Int = 0,
     dedup_samples::Bool = true,
-    rng::AbstractRNG = Random.GLOBAL_RNG
-)::Tuple{Vector{Int}, Float64}
+    rng::AbstractRNG = Random.GLOBAL_RNG,
+    compute_weights::Bool = true
+)
     N = length(μ)
 
     if do_checks
         N > 0 || error("μ must be non-empty.")
         size(Σ) == (N, N) || error("Σ must be N×N (got $(size(Σ))).")
-        (1 ≤ k ≤ N) || error("k must be between 1 and N.")
+        (1 ≤ k ≤ N) || error("k must be between 1 and N (got $k, N=$N).")
         all(isfinite, μ) && all(isfinite, Σ) || error("Non-finite entries in μ or Σ.")
         isfinite(epsilon) || error("epsilon must be finite.")
         if !enumerate_all
@@ -282,91 +288,37 @@ function mve_exhaustive_search(
         end
     end
 
-    # Prepare symmetric (and optionally stabilized) covariance once
+    # One-time stabilization and scorer
     Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
-
-    # Scorer closure (no allocations inside)
     scorer = _score_closure(μ, Σs, epsilon)
+
+    # Find best subset
+    best_sr::Float64 = -Inf
+    best_sel::Vector{Int} = Int[]
+    status::Symbol = :EXHAUSTIVE  # declare once
 
     if enumerate_all
         best_sr, best_sel = _enumerate_best!(N, k, scorer)
-        return best_sel, best_sr
+        status = :EXHAUSTIVE
     else
         best_sr, best_sel = _sample_best!(rng, N, k, max_samples, scorer; dedup=dedup_samples)
-        return best_sel, best_sr
-    end
-end
-
-"""
-    mve_exhaustive_search_gridk(μ, Σ;
-                                k_grid::AbstractVector{<:Integer},
-                                epsilon::Real = Utils.EPS_RIDGE,
-                                stabilize_Σ::Bool = true,
-                                do_checks::Bool = false,
-                                enumerate_all::Bool = true,
-                                max_samples_per_k::Int = 0,
-                                dedup_samples::Bool = true,
-                                rng::AbstractRNG = Random.GLOBAL_RNG
-                                ) -> Dict{Int,Tuple{Vector{Int},Float64}}
-
-Evaluate the best MVE Sharpe ratio over a grid of k's, sharing the stabilized
-covariance across all k to reduce overhead.
-
-Arguments
----------
-- `k_grid`          : vector of subset sizes (each 1 ≤ k ≤ N).
-- Other arguments   : as in `exhaustive_best_mve_sr`, applied per k.
-- `max_samples_per_k` : number of samples to draw at each k if sampling.
-
-Returns
--------
-- `Dict(k => (selection::Vector{Int}, sr::Float64))`.
-
-Details
--------
-- For reproducibility across k’s, a child RNG is derived from `rng` using a
-  random UInt seed per k. This stabilizes results across repeated runs with the
-  same parent RNG.
-"""
-function mve_exhaustive_search_gridk(
-    μ::AbstractVector{<:Real},
-    Σ::AbstractMatrix{<:Real};
-    k_grid::AbstractVector{<:Integer},
-    epsilon::Real = Utils.EPS_RIDGE,
-    stabilize_Σ::Bool = true,
-    do_checks::Bool = false,
-    enumerate_all::Bool = true,
-    max_samples_per_k::Int = 0,
-    dedup_samples::Bool = true,
-    rng::AbstractRNG = Random.GLOBAL_RNG
-)::Dict{Int,Tuple{Vector{Int},Float64}}
-    N = length(μ)
-    if do_checks
-        N > 0 || error("μ must be non-empty.")
-        size(Σ) == (N, N) || error("Σ must be N×N.")
-        all(1 .≤ k_grid .≤ N) || error("All k in k_grid must satisfy 1 ≤ k ≤ $N.")
-        isfinite(epsilon) || error("epsilon must be finite.")
-        if !enumerate_all
-            max_samples_per_k > 0 || error("When enumerate_all=false, `max_samples_per_k` must be > 0.")
-        end
+        status = :SAMPLED
     end
 
-    # Precompute stabilized covariance once for the entire grid
-    Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
-    scorer = _score_closure(μ, Σs, epsilon)
-
-    out = Dict{Int,Tuple{Vector{Int},Float64}}()
-    for k in k_grid
-        if enumerate_all
-            best_sr, best_sel = _enumerate_best!(N, k, scorer)
-            out[k] = (best_sel, best_sr)
-        else
-            rng_k = MersenneTwister(rand(rng, UInt))  # derived RNG for reproducibility
-            best_sr, best_sel = _sample_best!(rng_k, N, k, max_samples_per_k, scorer; dedup=dedup_samples)
-            out[k] = (best_sel, best_sr)
-        end
+    # Compute weights or return zeros
+    weights = if compute_weights && !isempty(best_sel)
+        SharpeRatio.compute_mve_weights(μ, Σs;
+                                        selection=best_sel,
+                                        stabilize_Σ=false,
+                                        do_checks=false)
+    else
+        zeros(Float64, N)
     end
-    return out
+
+    return (selection = best_sel,
+            weights   = weights,
+            sr        = best_sr,
+            status    = status)
 end
 
 end # module

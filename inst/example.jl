@@ -49,18 +49,23 @@ _fmt_ks(v::Vector{Int}) = isempty(v) ? "(none)" : join(sort(unique(v)), ", ")
 
 # Exhaustive: (μ, Σ, k; exactly_k=true)
 function run_exhaustive(μ, Σ, k)
-    sel = nothing; sr = NaN; st = :OK
+    sel = w = nothing; sr = NaN; st = :OK
     tsec = @elapsed begin
-        sel, sr = SparseMaxSR.mve_exhaustive_search(
+        res = SparseMaxSR.mve_exhaustive_search(
             μ, Σ;
             k = k,
             epsilon = SparseMaxSR.EPS_RIDGE,
             stabilize_Σ = true,
             do_checks = false,
-            enumerate_all = true
+            enumerate_all = true,
+            compute_weights = true,   # or false if you don't need weights here
         )
+        sel = res.selection
+        w   = res.weights
+        sr  = res.sr
+        st  = res.status             # will be :EXHAUSTIVE
     end
-    return sel, sr, tsec, st
+    return sel, w, sr, tsec, st
 end
 
 
@@ -220,7 +225,7 @@ for k in ks
     # Exhaustive (guarded)
     if binomial(N, k) ≤ EXH_CAP
         try
-            _, sr, t, _ = run_exhaustive(μ, Σ, k)
+            _, _, sr, t, _ = run_exhaustive(μ, Σ, k)
             cells[(k, "EXHAUSTIVE")] = cell(sr, t)
         catch
             cells[(k, "EXHAUSTIVE")] = "ERR"

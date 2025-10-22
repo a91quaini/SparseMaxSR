@@ -158,16 +158,20 @@ Normalization does **not** affect Sharpe ratios (scale‑invariant).
 #### `mve_exhaustive_search`
 
 ```julia
-mve_exhaustive_search(μ::AbstractVector, Σ::AbstractMatrix;
+mve_exhaustive_search(μ::AbstractVector{<:Real},
+                      Σ::AbstractMatrix{<:Real};
                       k::Integer,
-                      epsilon::Real=EPS_RIDGE,
-                      stabilize_Σ::Bool=true,
-                      do_checks::Bool=false,
-                      enumerate_all::Bool=true,
-                      max_samples::Int=0,
-                      dedup_samples::Bool=true,
-                      rng::AbstractRNG=Random.GLOBAL_RNG)
-    -> Tuple{Vector{Int}, Float64}
+                      epsilon::Real = Utils.EPS_RIDGE,
+                      stabilize_Σ::Bool = true,
+                      do_checks::Bool = false,
+                      # enumeration / sampling knobs
+                      enumerate_all::Bool = true,
+                      max_samples::Int = 0,
+                      dedup_samples::Bool = true,
+                      rng::AbstractRNG = Random.GLOBAL_RNG,
+                      # outputs
+                      compute_weights::Bool = true
+) -> NamedTuple{(:selection, :weights, :sr, :status)}
 ```
 
 Enumerates or samples subsets of size `k`, returning the best subset and its MVE Sharpe ratio.  
@@ -182,28 +186,9 @@ For feasible $\binom{N}{k}$, set `enumerate_all=true`; otherwise, provide `ma
 | `dedup_samples` | Ensure sampled supports are unique |
 | `rng` | Random number generator |
 | `epsilon`, `stabilize_Σ`, `do_checks` | Numerical options |
+| `compute_weights` | Output optimal weights |
 
 Returns `(selection, sr)`.
-
----
-
-#### `mve_exhaustive_search_gridk`
-
-```julia
-mve_exhaustive_search_gridk(μ::AbstractVector, Σ::AbstractMatrix;
-                            k_grid::AbstractVector{<:Integer},
-                            epsilon::Real=EPS_RIDGE,
-                            stabilize_Σ::Bool=true,
-                            do_checks::Bool=false,
-                            enumerate_all::Bool=true,
-                            max_samples_per_k::Int=0,
-                            dedup_samples::Bool=true,
-                            rng::AbstractRNG=Random.GLOBAL_RNG)
-    -> Dict{Int,Tuple{Vector{Int},Float64}}
-```
-
-Evaluates the exhaustive search for multiple `k` values using a shared stabilized covariance.  
-Each entry of the returned dictionary maps `k ⇒ (selection, sr)`.
 
 ---
 

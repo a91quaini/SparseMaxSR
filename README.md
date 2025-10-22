@@ -1,32 +1,32 @@
 # SparseMaxSR.jl
 
 **SparseMaxSR** is a Julia package for *mean–variance efficient (MVE)* portfolio selection under **cardinality constraints**.  
-It provides unified, numerically robust tools to estimate **sparse maximum-Sharpe portfolios**, i.e., portfolios composed of at most or exactly *k* assets out of *N*, while preserving the classical mean–variance structure.
+It provides unified, numerically robust tools to estimate **sparse maximum‑Sharpe portfolios**, i.e., portfolios composed of at most or exactly *k* assets out of *N*, while preserving the classical mean–variance structure.
 
 ---
 
 ## 1. Problem statement
 
-We seek to solve the *sparse Sharpe-maximization problem*:
+We seek to solve the *sparse Sharpe‑maximization problem*:
 
-\[
-\max_{w\in\mathbb{R}^N} 
+$$
+\max_{w \in \mathbb{R}^N}
 \frac{w' \mu}{\sqrt{w' \Sigma w}}
 \quad \text{s.t.} \quad \|w\|_0 \le k,
-\]
+$$
 
-where  
+where
 
-- \( \mu \in \mathbb{R}^N \): vector of expected excess returns,  
-- \( \Sigma \in \mathbb{R}^{N\times N} \): covariance matrix of returns,  
-- \( \|w\|_0 \): number of nonzero elements in \(w\) (sparsity).  
+- $\mu \in \mathbb{R}^N$: vector of expected excess returns,  
+- $\Sigma \in \mathbb{R}^{N\times N}$: covariance matrix of returns,  
+- $\|w\|_0$: number of nonzero elements in $w$ (sparsity).
 
-The MVE (mean–variance efficient) benchmark portfolio without sparsity is
+The unconstrained MVE (mean–variance efficient) portfolio is
 
-\[
-w^{\text{MVE}} = \Sigma^{-1}\mu, \qquad
+$$
+w_{\text{MVE}} = \Sigma^{-1}\mu, \qquad
 SR_{\text{MVE}} = \sqrt{\mu'\Sigma^{-1}\mu}.
-\]
+$$
 
 SparseMaxSR provides algorithms that approximate this solution when the support size is restricted.
 
@@ -38,17 +38,17 @@ SparseMaxSR offers three complementary approaches, all sharing a unified API:
 
 | Method | Description | Typical use |
 |:--------|:-------------|:-------------|
-| **Exhaustive / Random Search** | Enumerates or samples subsets of size *k* and selects the one with maximal in-sample MVE Sharpe ratio. | Small N (≤ 30–40) or validation of heuristics. |
-| **LASSO Relaxation Search** | Solves a continuous relaxation via **Elastic-Net (GLMNet)** regression; selects the largest support ≤ *k* and optionally refits exact MVE weights. | Large N, fast approximation. |
-| **MIQP Heuristic Search** | Mixed-integer quadratic heuristic via **JuMP + CPLEX**, with optional cardinality band and progressive bound expansion. | Medium/large N; high accuracy with time control. |
+| **Exhaustive / Random Search** | Enumerates or samples subsets of size *k* and selects the one with maximal in‑sample MVE Sharpe ratio. | Small N (≤ 30–40) or validation of heuristics. |
+| **LASSO Relaxation Search** | Solves a continuous relaxation via **Elastic‑Net (GLMNet)** regression; selects the largest support ≤ *k* and optionally refits exact MVE weights. | Large N, fast approximation. |
+| **MIQP Heuristic Search** | Mixed‑integer quadratic heuristic via **JuMP + CPLEX**, with optional cardinality band and progressive bound expansion. | Medium/large N; high accuracy with time control. |
 
-All methods call the shared low-level routines in the [`SharpeRatio`](#sharperatio-module) and [`Utils`](#utils-module) modules for stable covariance handling and Sharpe computation.
+All methods call the shared low‑level routines in the [`SharpeRatio`](#sharperatio-module) and [`Utils`](#utils-module) modules for stable covariance handling and Sharpe computation.
 
 ---
 
 ## 3. Installation
 
-### Option A — local development
+### Option A — local development
 
 ```julia
 julia> using Pkg
@@ -57,7 +57,7 @@ julia> Pkg.develop(path="/path/to/SparseMaxSR")
 julia> using SparseMaxSR
 ```
 
-### Option B — clone from Git
+### Option B — clone from Git
 
 ```julia
 julia> using Pkg
@@ -75,7 +75,7 @@ julia> using SparseMaxSR
 |:------------|:---------|
 | `LinearAlgebra`, `Statistics`, `Random` | Core numerical routines |
 | `Combinatorics` | Exhaustive and random subset generation |
-| `GLMNet` | LASSO / Elastic-Net path solver |
+| `GLMNet` | LASSO / Elastic‑Net path solver |
 | `JuMP`, `MathOptInterface`, `CPLEX` | MIQP heuristic search |
 
 ---
@@ -87,8 +87,8 @@ All main routines return **named tuples** `(selection, weights, sr, status)` or 
 | Field | Meaning |
 |:------|:---------|
 | `selection` | Vector of indices of selected assets |
-| `weights` | Portfolio weights (zeros off-support) |
-| `sr` | In-sample Sharpe ratio |
+| `weights` | Portfolio weights (zeros off‑support) |
+| `sr` | In‑sample Sharpe ratio |
 | `status` | Symbol describing solver outcome (`:OK`, `:LASSO_PATH_EXACT_K`, etc.) |
 
 ---
@@ -107,12 +107,12 @@ compute_sr(w::AbstractVector, μ::AbstractVector, Σ::AbstractMatrix;
 
 Computes the Sharpe ratio of a given portfolio:
 
-\[
+$$
 SR(w) = \frac{w' \mu}{\sqrt{w' (\Sigma + \epsilon I) w}}.
-\]
+$$
 
 If `selection` is provided, only those indices contribute to the numerator and denominator.  
-Returns `NaN` when variance ≤ 0 or not finite.
+Returns `NaN` when variance ≤ 0 or not finite.
 
 ---
 
@@ -126,13 +126,13 @@ compute_mve_sr(μ::AbstractVector, Σ::AbstractMatrix;
                do_checks::Bool=false) -> Float64
 ```
 
-Computes the **maximum Sharpe ratio** of the *mean–variance efficient* portfolio on a given subset:
+Computes the **maximum Sharpe ratio** of the mean–variance efficient (MVE) portfolio on a given subset:
 
-\[
+$$
 SR^*(S) = \sqrt{ \mu_S' \Sigma_S^{-1} \mu_S }.
-\]
+$$
 
-When `selection` is empty, the full MVE SR is returned.
+When `selection` is empty, the full‑universe MVE Sharpe ratio is returned.
 
 ---
 
@@ -147,9 +147,9 @@ compute_mve_weights(μ::AbstractVector, Σ::AbstractMatrix;
                     do_checks::Bool=false) -> Vector{Float64}
 ```
 
-Computes MVE weights \( w = \Sigma^{-1}\mu \) (restricted to the chosen support if provided).  
-If `normalize_weights=true`, scales weights by `Utils.normalize_weights(w)` to avoid degenerate magnitudes.  
-Normalization does **not** affect Sharpe ratios (scale-invariant).
+Computes MVE weights $w = \Sigma^{-1}\mu$ (restricted to the chosen support if provided).  
+If `normalize_weights=true`, weights are rescaled for numerical stability.  
+Normalization does **not** affect Sharpe ratios (scale‑invariant).
 
 ---
 
@@ -170,18 +170,18 @@ mve_exhaustive_search(μ::AbstractVector, Σ::AbstractMatrix;
     -> Tuple{Vector{Int}, Float64}
 ```
 
-Enumerates or samples subsets of size `k`, returning the best subset and its MVE Sharpe ratio.  
-For feasible `N choose k`, set `enumerate_all=true`; otherwise, provide `max_samples`.
+Enumerates or samples subsets of size `k`, returning the best subset and its MVE Sharpe ratio.  
+For feasible $\binom{N}{k}$, set `enumerate_all=true`; otherwise, provide `max_samples`.
 
 | Argument | Description |
 |:----------|:-------------|
-| `μ`, `Σ` | Mean and covariance |
+| `μ`, `Σ` | Mean and covariance |
 | `k` | Target subset size |
-| `enumerate_all` | Enumerate all combinations (true) or sample |
+| `enumerate_all` | Enumerate all combinations (`true`) or sample |
 | `max_samples` | Number of samples if not enumerating |
 | `dedup_samples` | Ensure sampled supports are unique |
 | `rng` | Random number generator |
-| `epsilon`, `stabilize_Σ`, `do_checks` | Numerical options |
+| `epsilon`, `stabilize_Σ`, `do_checks` | Numerical options |
 
 Returns `(selection, sr)`.
 
@@ -202,8 +202,8 @@ mve_exhaustive_search_gridk(μ::AbstractVector, Σ::AbstractMatrix;
     -> Dict{Int,Tuple{Vector{Int},Float64}}
 ```
 
-Evaluates the exhaustive search for multiple `k` values using a shared stabilized covariance.  
-Each entry of the returned dictionary maps `k ⇒ (selection, sr)`.
+Evaluates the exhaustive search for multiple `k` values using a shared stabilized covariance.  
+Each entry of the returned dictionary maps `k ⇒ (selection, sr)`.
 
 ---
 
@@ -228,16 +228,16 @@ mve_lasso_relaxation_search(R::AbstractMatrix{<:Real};
     -> NamedTuple{(:selection,:weights,:sr,:status)}
 ```
 
-**Path-based Elastic-Net relaxation** of the sparse MVE problem:
+**Path‑based Elastic‑Net relaxation** of the sparse MVE problem:
 
-1. Fits GLMNet path \( y = R \beta + \varepsilon \).
-2. Chooses the largest support ≤ `k`.
-3. Either:
+1. Fits GLMNet path $y = R\beta + \varepsilon$.  
+2. Chooses the largest support ≤ `k`.  
+3. Either:  
    - `use_refit=true`: compute exact MVE SR and refit weights on the selected support;  
    - `use_refit=false`: return the raw or normalized LASSO coefficients.
 
 **Statuses**:  
-`:LASSO_PATH_EXACT_K`, `:LASSO_PATH_ALMOST_K`, `:LASSO_ALLEMPTY`.
+`:LASSO_PATH_EXACT_K`, `:LASSO_PATH_ALMOST_K`, `:LASSO_ALLEMPTY`.
 
 ---
 
@@ -268,52 +268,33 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
                           do_checks::Bool=false)
 ```
 
-Heuristic mixed-integer quadratic programming (MIQP) solver for sparse MVE selection.  
+Heuristic mixed‑integer quadratic programming (MIQP) solver for sparse MVE selection.  
 The optimization problem is:
 
-\[
-\min_{x,v} \frac{1}{2}\, \gamma\, x'\Sigma_s x - \mu'x
-\quad \text{s.t.}\quad
-m \le \sum_i v_i \le k,\;
-v_i=0 \Rightarrow x_i=0,\;
-v_i=1 \Rightarrow f_{\min,i}\!\le\!x_i\!\le\!f_{\max,i}.
-\]
+$$
+\begin{aligned}
+\min_{x,v} \; & \tfrac{1}{2} \gamma x' \Sigma_s x - \mu'x \\
+\text{s.t.} \;& m \le \sum_i v_i \le k, \\
+& v_i=0 \Rightarrow x_i=0, \\
+& v_i=1 \Rightarrow f_{\min,i} \le x_i \le f_{\max,i}.
+\end{aligned}
+$$
 
-If `normalize_weights=true`, adds a budget constraint ∑x = 1 and rescales outputs.
+If `normalize_weights=true`, adds a budget constraint $\sum_i x_i = 1$ and rescales outputs.
 
 Key options:
-- `expand_rounds`, `expand_factor`, `expand_tol`: progressive bound-expansion heuristic  
-- `mipgap`, `time_limit`: CPLEX tolerances  
+- `expand_rounds`, `expand_factor`, `expand_tol`: progressive bound‑expansion heuristic  
+- `mipgap`, `time_limit`: CPLEX tolerances  
 - `use_refit`: recompute exact MVE SR/weights on final support  
-- `normalize_weights`: toggles ∑x=1 and post-normalization
+- `normalize_weights`: toggles ∑x = 1 and post‑normalization
 
-Returns `(selection, weights, sr, status)`.
-
----
-
-### 🔹 Utils module
-
-#### `normalize_weights`
-
-```julia
-normalize_weights(w::AbstractVector;
-                  mode::Symbol=:relative,
-                  tol::Real=1e-6,
-                  do_checks::Bool=false) -> Vector{Float64}
-```
-
-Returns a stably normalized version of `w`:
-
-- `mode=:relative` → divide by `max(|∑w|, tol·‖w‖₁, 1e-10)` (default, scale-safe).  
-- `mode=:absolute` → divide by `max(|∑w|, tol, 1e-10)` (forces |∑w|≈1).
-
-If both the sum and L1-norm are ≈ 0, returns a zero vector.
+Returns `(selection, weights, sr, status)`.
 
 ---
 
 ## 6. Example usage
 
-The included [`example.jl`](example.jl) script compares all methods on simulated two-factor returns:
+The included [`example.jl`](example.jl) script compares all methods on simulated two‑factor returns:
 
 ```bash
 julia --project=. example.jl
@@ -322,12 +303,12 @@ julia --project=. example.jl
 Example output:
 
 ```
-Results — Experiment A (T=500, N=30)
+Results — Experiment A (T=500, N=30)
 ------------------------------------
-k      | EXHAUSTIVE         | LASSO-VANILLA      | LASSO-REFIT        | MIQP-VANILLA       | MIQP-REFIT
+k      | EXHAUSTIVE         | LASSO‑VANILLA      | LASSO‑REFIT        | MIQP‑VANILLA       | MIQP‑REFIT
 -----------------------------------------------------------------------------------------------------
-1      | 0.1538 / 0.00s     | 0.1538 / 0.00s     | 0.1538 / 0.00s     | 0.1538 / 4.7s      | 0.1538 / 0.2s
-3      | 0.1962 / 0.07s     | 0.1760 / 0.00s     | 0.1945 / 0.00s     | 0.1930 / 3.1s      | 0.1955 / 0.6s
+1      | 0.1538 / 0.00s     | 0.1538 / 0.00s     | 0.1538 / 0.00s     | 0.1538 / 4.7s      | 0.1538 / 0.2s
+3      | 0.1962 / 0.07s     | 0.1760 / 0.00s     | 0.1945 / 0.00s     | 0.1930 / 3.1s      | 0.1955 / 0.6s
 ...
 ```
 
@@ -335,9 +316,9 @@ k      | EXHAUSTIVE         | LASSO-VANILLA      | LASSO-REFIT        | MIQP-VAN
 
 ## 7. References
 
-- Markowitz (1952): *Portfolio Selection*.  
-- Brodie et al. (2009): *Sparse Portfolio Selection via LASSO*.  
-- Bertsimas & King (2016): *OR Methods in Portfolio Optimization*.  
-- Quaini (2025): *Sparse Maximum-Sharpe Heuristics in Julia* (forthcoming working paper).
+- Markowitz (1952): *Portfolio Selection*.  
+- Brodie et al. (2009): *Sparse Portfolio Selection via LASSO*.  
+- Bertsimas & King (2016): *OR Methods in Portfolio Optimization*.  
+- Quaini (2025): *Sparse Maximum‑Sharpe Heuristics in Julia* (forthcoming).
 
 ---

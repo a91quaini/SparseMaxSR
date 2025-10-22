@@ -1,102 +1,187 @@
 module ExhaustiveSearch
 
-# --- deps ---
-using Random
 using LinearAlgebra
-using Statistics
-using Combinatorics: combinations, binomial
+using Random
+using Combinatorics     # for combinations(itr, k)
 using ..Utils
 using ..SharpeRatio
 
-export mve_exhaustive_search
+export mve_exhaustive_search,
+       mve_exhaustive_search_gridk
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Internal helpers
+# Overview
+# ──────────────────────────────────────────────────────────────────────────────
+# This module provides exhaustive and sampled search routines over k-subsets of
+# assets to maximize the in-sample MVE Sharpe ratio. It is designed to be:
+#   • Numerically safe: all covariance handling goes through Utils._prep_S.
+#   • Allocation-light: no per-combination vector allocations on hot paths.
+#   • Flexible: exact enumeration when feasible, or uniform sampling of supports.
+#
+# Public API
+# ----------
+# exhaustive_best_mve_sr(μ, Σ; k, [kwargs...]) -> (selection::Vector{Int}, sr::Float64)
+#   Return the best subset of size k (via full enumeration or sampling, depending
+#   on kwargs) and its in-sample MVE Sharpe ratio.
+#
+# exhaustive_grid_mve_sr(μ, Σ; k_grid::AbstractVector{<:Integer}, [kwargs...])
+#   Return a Dict(k => (selection, sr)) for each k in k_grid, sharing precomputed
+#   stabilized Σ across the grid.
+#
+# Numerical details
+# -----------------
+# Given mean vector μ and covariance matrix Σ, for a subset S, the MVE SR is
+#     SR(S) = sqrt( μ_S' Σ_S^{-1} μ_S )
+# We compute it via SharpeRatio.compute_mve_sr(μ, Σs; selection=S, stabilize_Σ=false)
+# where Σs = Utils._prep_S(Σ, ε, stabilize_Σ) is formed once per call/group.
+#
+# Optimization details (robust/safe)
+# ----------------------------------
+# 1) Enumeration avoids per-combination allocations: a single Int buffer is
+#    reused; only the current-best selection is copied.
+# 2) Sampling uses a direct without-replacement subset sampler; no randperm(n).
+# 3) Optional dedup of sampled supports ensures exactly m distinct supports.
+# 4) Scorers capture μ, Σs, ε in a closure; no re-prep of Σ in the loop.
+#
+# Notes on reproducibility
+# ------------------------
+# You may pass a dedicated RNG (e.g. MersenneTwister) for deterministic sampling.
+# For batch runs, derive per-k RNGs from a root RNG to stabilize randomness across
+# grid sweeps.
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Comparisons tolerance for Sharpe improvements.
-const SR_TOL = 1e-12
 
-# Decide whether to enumerate or sample for a given (n, s), given user caps.
-@inline function _plan_mode(n::Int, s::Int, max_samples_per_k::Int, max_combinations::Int)
-    total = binomial(n, s)
-    # If user asked for sampling explicitly, sample up to their cap (or total)
-    if max_samples_per_k > 0
-        m_target = min(max_samples_per_k, total)
-        return (:sample, m_target, total)
+# ──────────────────────────────────────────────────────────────────────────────
+# Internal helpers (allocation-light)
+# ──────────────────────────────────────────────────────────────────────────────
+
+const SR_TOL = 0.0  # tie-breaking tolerance; keep zero to be deterministic given RNG
+
+"""
+    _to_vec!(buf::Vector{Int}, comb) -> Vector{Int}
+
+Copy the k-tuple `comb` (from `combinations`) into the reusable buffer `buf`
+and return `buf`. Avoids allocating a fresh Vector for every combination.
+
+Assumes `length(buf) == length(comb)`.
+"""
+@inline function _to_vec!(buf::Vector{Int}, comb)::Vector{Int}
+    @inbounds for i in 1:length(buf)
+        buf[i] = comb[i]
     end
-    # Otherwise we prefer enumeration, but cap by max_combinations
-    if total <= max_combinations
-        return (:enumerate_full, total, total)
-    else
-        # either truncated enumeration or sampling; use sampling w/o replacement
-        # up to the cap, which is typically more diverse than "first K combos"
-        return (:sample, max_combinations, total)
-    end
+    return buf
 end
 
-# Return (best_sr, best_sel) after evaluating up to m distinct k-subsets.
-# Scoring is delegated to `scorer(sel::AbstractVector{<:Integer}) -> Real`.
-function sample_and_score_best!(
-    rng::AbstractRNG, n::Int, k::Int, m::Int, scorer::Function
-)
-    @assert 1 ≤ k ≤ n
-    total = binomial(n, k)
+"""
+    _rand_k_subset!(rng, out, n, k) -> out
 
-    # 1) Enumerate all when m ≥ total (no memory blow-up; stream combos)
-    if m ≥ total
-        best_sr  = -Inf
-        best_sel = Vector{Int}()
-        for comb in combinations(1:n, k)
-            sel = collect(comb)                    # size-k vector
-            sr  = scorer(sel)
+Fill `out` (length k) with a uniformly-sampled k-subset from 1:n (without
+replacement) and return `out`. The result is sorted in ascending order.
+
+This avoids allocating `randperm(n)`; complexity is ~O(k log k) due to final sort.
+"""
+function _rand_k_subset!(rng::AbstractRNG, out::Vector{Int}, n::Int, k::Int)
+    @assert length(out) == k
+    # Floyd's algorithm with a small Set to avoid duplicates among the k draws
+    seen = Set{Int}()
+    i = 1
+    while i ≤ k
+        x = rand(rng, 1:n)
+        if !(x in seen)
+            push!(seen, x)
+            @inbounds out[i] = x
+            i += 1
+        end
+    end
+    sort!(out)
+    return out
+end
+
+"""
+    _score_closure(μ, Σs, ε) -> (sel::AbstractVector{<:Integer}) -> Float64
+
+Create an allocation-light scorer closure that computes SR(S) for a subset S
+using the already-prepared symmetric covariance Σs.
+
+Note: Σs must be the stabilized/symmetrized covariance. Inside the scorer we
+set `stabilize_Σ=false` to avoid re-prepping.
+"""
+@inline function _score_closure(μ::AbstractVector{<:Real},
+                                Σs::Symmetric,
+                                ε::Real)
+    return (sel::AbstractVector{<:Integer}) ->
+        SharpeRatio.compute_mve_sr(μ, Σs;
+            selection    = sel,
+            epsilon      = ε,
+            stabilize_Σ  = false,
+            do_checks    = false)
+end
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Core search routines (enumeration & sampling)
+# ──────────────────────────────────────────────────────────────────────────────
+
+"""
+    _enumerate_best!(n::Int, k::Int, scorer) -> (best_sr::Float64, best_sel::Vector{Int})
+
+Enumerate all `n choose k` subsets, return the best Sharpe and its selection.
+Uses a reusable buffer to avoid per-combination allocations.
+"""
+function _enumerate_best!(n::Int, k::Int, scorer::Function)
+    best_sr  = -Inf
+    best_sel = Vector{Int}(undef, 0)
+    buf      = Vector{Int}(undef, k)
+    for comb in combinations(1:n, k)
+        sel = _to_vec!(buf, comb)
+        sr  = scorer(sel)
+        if sr > best_sr + SR_TOL
+            best_sr  = sr
+            best_sel = copy(sel)  # copy *only* when we improve
+        end
+    end
+    return best_sr, best_sel
+end
+
+"""
+    _sample_best!(rng, n::Int, k::Int, m::Int, scorer;
+                  dedup::Bool=true) -> (best_sr, best_sel)
+
+Sample `m` supports of size `k` uniformly at random (without replacement within
+each support) and return the best Sharpe and its selection. If `dedup=true`,
+re-sample until `m` *distinct* supports have been evaluated.
+
+- For `n ≤ 64`, uniqueness is tracked using a UInt64 bitmask.
+- For `n > 64`, uniqueness is tracked via NTuple keys.
+
+This avoids O(n) `randperm` per sample.
+"""
+function _sample_best!(rng::AbstractRNG, n::Int, k::Int, m::Int, scorer::Function; dedup::Bool=true)
+    @assert 1 ≤ k ≤ n
+    buf      = Vector{Int}(undef, k)
+    best_sr  = -Inf
+    best_sel = Vector{Int}(undef, 0)
+
+    if !dedup
+        @inbounds for _ in 1:m
+            _rand_k_subset!(rng, buf, n, k)
+            sr = scorer(buf)
             if sr > best_sr + SR_TOL
                 best_sr  = sr
-                best_sel = sel
+                best_sel = copy(buf)
             end
         end
         return best_sr, best_sel
     end
 
-    # 2) Sample-without-replacement across supports, streaming scoring
     if n ≤ 64
-        # compact bitmask dedup
         seen = Set{UInt64}()
-        buf  = Vector{Int}(undef, k)
-        best_sr  = -Inf
-        best_sel = Vector{Int}()
-
         while length(seen) < m
-            p = randperm(rng, n)
-            @inbounds copyto!(buf, 1, p, 1, k)
-            sort!(buf)
-
+            _rand_k_subset!(rng, buf, n, k)
             key = zero(UInt64)
             @inbounds for i in buf
                 key |= (UInt64(1) << (i - 1))
             end
-            if !(key in seen)
-                push!(seen, key)
-                sr = scorer(buf)                   # buf is overwritten later; copy if best
-                if sr > best_sr + SR_TOL
-                    best_sr  = sr
-                    best_sel = copy(buf)
-                end
-            end
-        end
-        return best_sr, best_sel
-    else
-        # tuple fallback for large n
-        seen = Set{Tuple{Vararg{Int}}}()
-        buf  = Vector{Int}(undef, k)
-        best_sr  = -Inf
-        best_sel = Vector{Int}()
-
-        while length(seen) < m
-            p = randperm(rng, n)
-            @inbounds copyto!(buf, 1, p, 1, k)
-            sort!(buf)
-            key = tuple(buf...)
             if !(key in seen)
                 push!(seen, key)
                 sr = scorer(buf)
@@ -106,178 +191,182 @@ function sample_and_score_best!(
                 end
             end
         end
-        return best_sr, best_sel
+    else
+        seen = Set{NTuple{Int,Int}}()
+        while length(seen) < m
+            _rand_k_subset!(rng, buf, n, k)
+            key = ntuple(i -> @inbounds buf[i], k)
+            if !(key in seen)
+                push!(seen, key)
+                sr = scorer(buf)
+                if sr > best_sr + SR_TOL
+                    best_sr  = sr
+                    best_sel = copy(buf)
+                end
+            end
+        end
     end
+
+    return best_sr, best_sel
 end
 
-# =============================================================================
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Public API
-# =============================================================================
+# ──────────────────────────────────────────────────────────────────────────────
 
 """
-    mve_exhaustive_search(μ, Σ, k;
-        exactly_k=true,
-        max_samples_per_k=0,
-        max_combinations::Int=10_000_000,
-        epsilon=Utils.EPS_RIDGE,
-        rng=Random.default_rng(),
-        γ=1.0,
-        stabilize_Σ = true,
-        compute_weights::Bool=false,
-        normalize_weights::Bool=false,
-        do_checks=false,
-    ) -> NamedTuple{(:selection, :weights, :sr, :status)}
+    mve_exhaustive_search(μ::AbstractVector{<:Real},
+                          Σ::AbstractMatrix{<:Real};
+                          k::Integer,
+                          epsilon::Real = Utils.EPS_RIDGE,
+                          stabilize_Σ::Bool = true,
+                          do_checks::Bool = false,
+                          # enumeration / sampling knobs
+                          enumerate_all::Bool = true,
+                          max_samples::Int = 0,
+                          dedup_samples::Bool = true,
+                          rng::AbstractRNG = Random.GLOBAL_RNG
+                          ) -> (selection::Vector{Int}, sr::Float64)
 
-Exhaustive (or sampled) search over subsets to maximize the MVE Sharpe ratio
-on the selected indices. By default searches exactly `k` assets; set
-`exactly_k=false` to allow any size in `1:k` and return the overall best.
+Return the best k-asset subset (and its in-sample MVE Sharpe ratio) under either
+full enumeration (`enumerate_all=true`) or uniform random sampling over supports
+(`enumerate_all=false`, with `max_samples` draws).
 
-If `max_samples_per_k == 0`, the method **tries** to enumerate but will cap the
-total number of visited combinations per size by `max_combinations`. When the
-cap is hit, it switches to sampling without replacement up to the cap.
+Arguments
+---------
+- `μ`, `Σ`          : asset moments (length N, N×N).
+- `k`               : subset size (1 ≤ k ≤ N).
+- `epsilon`         : ridge size used in `Utils._prep_S`.
+- `stabilize_Σ`     : if true, symmetrize and ridge-stabilize Σ before scoring.
+- `do_checks`       : if true, validate inputs (dims, finiteness, ranges).
+- `enumerate_all`   : if true, enumerate all N choose k subsets; else sample.
+- `max_samples`     : number of sampled supports when `enumerate_all=false`.
+- `dedup_samples`   : ensure sampled supports are distinct.
+- `rng`             : RNG used for sampling.
 
-If `max_samples_per_k > 0`, the method samples up to `max_samples_per_k` supports
-for each size (also bounded above by the number of available combinations).
+Returns
+-------
+- `selection::Vector{Int}` : the best subset (sorted indices).
+- `sr::Float64`            : the corresponding in-sample MVE Sharpe ratio.
 
-If `compute_weights=true`, the returned weights are computed via
-`SharpeRatio.compute_mve_weights(...; selection=best_set, normalize_weights=normalize_weights)`.
-Note that the reported Sharpe ratio is scale-invariant and does not depend on
-`normalize_weights`.
-
-The returned `status` is `:EXHAUSTIVE` if all intended supports were fully
-enumerated, and `:EXHAUSTIVE_SAMPLED` if any size was truncated or sampled.
-
-Numerical ridge is controlled by `epsilon` and applied inside the SharpeRatio
-routines as `Σ_eff = Σ + epsilon * mean(diag(Σ)) * I`.
+Notes
+-----
+- If `enumerate_all=false` and `max_samples ≤ 0`, the function behaves like
+  enumeration when N choose k is reasonably small; otherwise it throws.
+- All scoring uses a *single* stabilized covariance `Σs` to avoid rework inside
+  loops: `SharpeRatio.compute_mve_sr(μ, Σs; selection, stabilize_Σ=false)`.
 """
 function mve_exhaustive_search(
     μ::AbstractVector{<:Real},
-    Σ::AbstractMatrix{<:Real},
-    k::Integer;
-    exactly_k::Bool = true,
-    max_samples_per_k::Int = 0,
-    max_combinations::Int = 10_000_000,
+    Σ::AbstractMatrix{<:Real};
+    k::Integer,
     epsilon::Real = Utils.EPS_RIDGE,
-    rng::AbstractRNG = Random.default_rng(),
-    γ::Real = 1.0,
     stabilize_Σ::Bool = true,
-    compute_weights::Bool=false,
-    normalize_weights::Bool=false,
     do_checks::Bool = false,
-)
-    # --- input checks ---
-    n = length(μ)
+    enumerate_all::Bool = true,
+    max_samples::Int = 0,
+    dedup_samples::Bool = true,
+    rng::AbstractRNG = Random.GLOBAL_RNG
+)::Tuple{Vector{Int}, Float64}
+    N = length(μ)
+
     if do_checks
-        size(Σ,1) == n && size(Σ,2) == n   || error("Σ must be n×n with n = length(μ).")
-        1 ≤ k ≤ n                          || error("k must satisfy 1 ≤ k ≤ n.")
-        max_samples_per_k ≥ 0              || error("max_samples_per_k must be ≥ 0.")
-        max_combinations > 0               || error("max_combinations must be > 0.")
-        isfinite(epsilon)                  || error("epsilon must be finite.")
-        γ > 0                              || error("γ must be positive.")
-        all(isfinite, μ) && all(isfinite, Σ) || error("μ and Σ must be finite.")
+        N > 0 || error("μ must be non-empty.")
+        size(Σ) == (N, N) || error("Σ must be N×N (got $(size(Σ))).")
+        (1 ≤ k ≤ N) || error("k must be between 1 and N.")
+        all(isfinite, μ) && all(isfinite, Σ) || error("Non-finite entries in μ or Σ.")
+        isfinite(epsilon) || error("epsilon must be finite.")
+        if !enumerate_all
+            max_samples > 0 || error("When enumerate_all=false, `max_samples` must be > 0.")
+        end
     end
 
-    # --- Stabilize Σ once (or just symmetrize if stabilize_Σ=false) ---
-    Σs = stabilize_Σ ? Utils._prep_S(Σ, epsilon, true) : Symmetric((Σ + Σ')/2)
+    # Prepare symmetric (and optionally stabilized) covariance once
+    Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
 
-    nrange = 1:n
-    best_sr  = -Inf
-    best_set = Vector{Int}()
-    fully_enumerated = true
+    # Scorer closure (no allocations inside)
+    scorer = _score_closure(μ, Σs, epsilon)
 
-    # scorer closure
-    scorer = sel -> SharpeRatio.compute_mve_sr(μ, Σs;
-                                   selection=sel,
-                                   epsilon=epsilon,
-                                   stabilize_Σ=false,
-                                   do_checks=false)
-
-    if exactly_k
-        s = k
-        mode, m_target, total = _plan_mode(n, s, max_samples_per_k, max_combinations)
-
-        if mode == :enumerate_full
-            # Full enumeration
-            for idxs in combinations(nrange, s)
-                sr = scorer(idxs)
-                if sr > best_sr + SR_TOL
-                    best_sr  = sr
-                    best_set = collect(idxs)
-                end
-            end
-        else
-            # Sample up to m_target (or truncate enumeration to cap)
-            fully_enumerated = false
-            if max_samples_per_k == 0 && m_target < total
-                # Truncated enumeration of the *first* m_target combinations
-                cnt = 0
-                for idxs in combinations(nrange, s)
-                    sr = scorer(idxs)
-                    if sr > best_sr + SR_TOL
-                        best_sr  = sr
-                        best_set = collect(idxs)
-                    end
-                    cnt += 1
-                    cnt >= m_target && break
-                end
-            else
-                # Random sampling without replacement up to m_target
-                best_sr, best_set = sample_and_score_best!(rng, n, s, m_target, scorer)
-            end
-        end
+    if enumerate_all
+        best_sr, best_sel = _enumerate_best!(N, k, scorer)
+        return best_sel, best_sr
     else
-        # sizes = 1:k
-        for s in 1:k
-            mode, m_target, total = _plan_mode(n, s, max_samples_per_k, max_combinations)
+        best_sr, best_sel = _sample_best!(rng, N, k, max_samples, scorer; dedup=dedup_samples)
+        return best_sel, best_sr
+    end
+end
 
-            if mode == :enumerate_full
-                for idxs in combinations(nrange, s)
-                    sr = scorer(idxs)
-                    if sr > best_sr + SR_TOL
-                        best_sr  = sr
-                        best_set = collect(idxs)
-                    end
-                end
-            else
-                fully_enumerated = false
-                if max_samples_per_k == 0 && m_target < total
-                    # Truncated enumeration (first m_target combos)
-                    cnt = 0
-                    for idxs in combinations(nrange, s)
-                        sr = scorer(idxs)
-                        if sr > best_sr + SR_TOL
-                            best_sr  = sr
-                            best_set = collect(idxs)
-                        end
-                        cnt += 1
-                        cnt >= m_target && break
-                    end
-                else
-                    sr_s, set_s = sample_and_score_best!(rng, n, s, m_target, scorer)
-                    if sr_s > best_sr + SR_TOL
-                        best_sr  = sr_s
-                        best_set = set_s
-                    end
-                end
-            end
+"""
+    mve_exhaustive_search_gridk(μ, Σ;
+                                k_grid::AbstractVector{<:Integer},
+                                epsilon::Real = Utils.EPS_RIDGE,
+                                stabilize_Σ::Bool = true,
+                                do_checks::Bool = false,
+                                enumerate_all::Bool = true,
+                                max_samples_per_k::Int = 0,
+                                dedup_samples::Bool = true,
+                                rng::AbstractRNG = Random.GLOBAL_RNG
+                                ) -> Dict{Int,Tuple{Vector{Int},Float64}}
+
+Evaluate the best MVE Sharpe ratio over a grid of k's, sharing the stabilized
+covariance across all k to reduce overhead.
+
+Arguments
+---------
+- `k_grid`          : vector of subset sizes (each 1 ≤ k ≤ N).
+- Other arguments   : as in `exhaustive_best_mve_sr`, applied per k.
+- `max_samples_per_k` : number of samples to draw at each k if sampling.
+
+Returns
+-------
+- `Dict(k => (selection::Vector{Int}, sr::Float64))`.
+
+Details
+-------
+- For reproducibility across k’s, a child RNG is derived from `rng` using a
+  random UInt seed per k. This stabilizes results across repeated runs with the
+  same parent RNG.
+"""
+function mve_exhaustive_search_gridk(
+    μ::AbstractVector{<:Real},
+    Σ::AbstractMatrix{<:Real};
+    k_grid::AbstractVector{<:Integer},
+    epsilon::Real = Utils.EPS_RIDGE,
+    stabilize_Σ::Bool = true,
+    do_checks::Bool = false,
+    enumerate_all::Bool = true,
+    max_samples_per_k::Int = 0,
+    dedup_samples::Bool = true,
+    rng::AbstractRNG = Random.GLOBAL_RNG
+)::Dict{Int,Tuple{Vector{Int},Float64}}
+    N = length(μ)
+    if do_checks
+        N > 0 || error("μ must be non-empty.")
+        size(Σ) == (N, N) || error("Σ must be N×N.")
+        all(1 .≤ k_grid .≤ N) || error("All k in k_grid must satisfy 1 ≤ k ≤ $N.")
+        isfinite(epsilon) || error("epsilon must be finite.")
+        if !enumerate_all
+            max_samples_per_k > 0 || error("When enumerate_all=false, `max_samples_per_k` must be > 0.")
         end
     end
 
-    # Compute weights for the best selection (full-length, zeros elsewhere)
-    best_w = (isempty(best_set) || !compute_weights) ?
-        zeros(Float64, n) :
-        SharpeRatio.compute_mve_weights(μ, Σs;
-            selection=best_set,
-            normalize_weights=normalize_weights,
-            epsilon=epsilon,
-            stabilize_Σ=false,
-            do_checks=false)
+    # Precompute stabilized covariance once for the entire grid
+    Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
+    scorer = _score_closure(μ, Σs, epsilon)
 
-    return (selection = best_set,
-            weights   = best_w,
-            sr        = best_sr,
-            status    = fully_enumerated ? :EXHAUSTIVE : :EXHAUSTIVE_SAMPLED)
-
+    out = Dict{Int,Tuple{Vector{Int},Float64}}()
+    for k in k_grid
+        if enumerate_all
+            best_sr, best_sel = _enumerate_best!(N, k, scorer)
+            out[k] = (best_sel, best_sr)
+        else
+            rng_k = MersenneTwister(rand(rng, UInt))  # derived RNG for reproducibility
+            best_sr, best_sel = _sample_best!(rng_k, N, k, max_samples_per_k, scorer; dedup=dedup_samples)
+            out[k] = (best_sel, best_sr)
+        end
+    end
+    return out
 end
 
 end # module

@@ -41,29 +41,48 @@ function _glmnet_path_select(
     do_checks && (length(y) == T || error("X and y have incompatible sizes."))
     do_checks && (1 ≤ k ≤ N || error("k must be between 1 and N."))
 
+    # Friendly handling of user-supplied lambda
     if lambda !== nothing
-        all(isfinite, lambda)   || error("`lambda` contains non-finite values.")
-        all(lambda .> 0)        || error("`lambda` must be strictly positive.")
-        all(diff(lambda) .< 0)  || error("`lambda` must be strictly decreasing.")
+        all(isfinite, lambda) || error("`lambda` contains non-finite values.")
+        all(lambda .> 0)      || error("`lambda` must be strictly positive.")
+        # Accept non-increasing and drop duplicates
+        if any(diff(lambda) .> 0)
+            error("`lambda` must be non-increasing.")
+        end
+        λ = unique(lambda)  # preserves order, removes duplicates
+        if length(λ) == 0
+            error("`lambda` is empty after removing duplicates.")
+        end
+        lambda = λ
     end
 
-    kwargs = (; alpha=alpha, intercept=false, standardize=standardize,
-               nlambda=nlambda, lambda_min_ratio=lambda_min_ratio)
+    # Hard caps to accelerate: GLMNet will stop when df exceeds dfmax
+    dfmax = k
+    pmax  = max(k + 5, 2*k)
+
+    kwargs_common = (
+        alpha=alpha, intercept=false, standardize=standardize,
+        dfmax=dfmax, pmax=pmax
+    )
+
     path = isnothing(lambda) ?
-        GLMNet.glmnet(X, y; kwargs...) :
-        GLMNet.glmnet(X, y; alpha=alpha, intercept=false, standardize=standardize, lambda=lambda)
+        GLMNet.glmnet(X, y; nlambda=nlambda, lambda_min_ratio=lambda_min_ratio, kwargs_common...) :
+        GLMNet.glmnet(X, y; lambda=lambda, kwargs_common...)
 
-    βmat = Array(path.betas)  # N × L
-    L = size(βmat, 2)
+    βmat = Array(path.betas)      # N × L (dense view of the path)
+    L    = size(βmat, 2)
 
-    best_idx = Int[]
     best_len = -1
+    best_idx = Int[]
     jstar    = 0
+
     @inbounds for j in L:-1:1
-        S = findall(!iszero, @view βmat[:, j])
-        s = length(S)
+        col = @view βmat[:, j]
+        # fast count first (no alloc)
+        s = count(!iszero, col)
         if s ≤ k && s > best_len
-            best_idx = S
+            # only now collect indices (allocates once for a winner)
+            best_idx = findall(!iszero, col)
             best_len = s
             jstar    = j
             if s == k
@@ -73,7 +92,7 @@ function _glmnet_path_select(
     end
 
     if best_len < 0
-        return (Int[], 0, zeros(Float64, N), :LASSO_PATH_ALMOST_K, βmat)
+        return (Int[], 0, zeros(Float64, size(X,2)), :LASSO_PATH_ALMOST_K, βmat)
     end
 
     status = (best_len == k) ? :LASSO_PATH_EXACT_K : :LASSO_PATH_ALMOST_K
@@ -179,7 +198,6 @@ A named tuple with:
 - Setting `use_refit=false` is faster but less accurate; refit mode is 
   typically preferred for reporting Sharpe ratios and portfolio composition.
 """
-
 function mve_lasso_relaxation_search(
     R::AbstractMatrix{<:Real};
     k::Integer,
@@ -196,10 +214,42 @@ function mve_lasso_relaxation_search(
     use_refit::Bool = true,
     do_checks::Bool = false
 )
-    T, N = size(R)
-    do_checks && (T > 1 || error("R must have at least 2 rows."))
-    do_checks && (N > 0 || error("R must have at least 1 column."))
-    (1 ≤ k ≤ N) || error("k must be between 1 and N.")
+    T, N = size(R) 
+
+    if do_checks
+        T > 1 || error("R must have at least 2 rows.")
+        N > 0 || error("R must have at least 1 column.")
+        (0 ≤ k ≤ N) || error("k must be between 0 and N.")  # allow k=0 fast path
+
+        if y !== nothing
+            length(y) == T || error("Length of y must equal number of rows of R.")
+            all(isfinite, y) || error("y contains non-finite values.")
+        end
+
+        # lambda policy: positive, NON-INCREASING (duplicates allowed), dedup in-place
+        if lambda !== nothing
+            all(isfinite, lambda) || error("`lambda` contains non-finite values.")
+            all(lambda .> 0)      || error("`lambda` must be strictly positive.")
+            any(diff(lambda) .> 0) && error("`lambda` must be non-increasing.")
+            lambda = unique(lambda)  # preserve order; remove duplicates
+            length(lambda) > 0 || error("`lambda` is empty after removing duplicates.")
+        end
+
+        isfinite(epsilon) || error("epsilon must be finite.")
+        alpha ≥ 0 && alpha ≤ 1 || error("alpha must be in [0,1].")
+    end
+
+    # k == 0 or k == N fast paths
+    if k == 0
+        return (selection = Int[], weights = zeros(Float64, N), sr = 0.0, status = :LASSO_ALLEMPTY)
+    elseif k == N
+        μ  = vec(mean(R; dims=1))
+        Σ  = cov(Matrix(R); corrected=true)
+        Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
+        sr = SharpeRatio.compute_mve_sr(μ, Σs; stabilize_Σ=false)
+        w  = compute_weights ? SharpeRatio.compute_mve_weights(μ, Σs; normalize_weights=normalize_weights, stabilize_Σ=false) : zeros(Float64, N)
+        return (selection = collect(1:N), weights = w, sr = sr, status = :LASSO_PATH_EXACT_K)
+    end
 
     yy = isnothing(y) ? ones(Float64, T) : y
     do_checks && (length(yy) == T || error("Length of y must equal number of rows of R."))
@@ -273,14 +323,32 @@ function mve_lasso_relaxation_search(
     do_checks::Bool = false
 )
     N = length(μ)
-    do_checks && (size(Σ,1) == N && size(Σ,2) == N || error("Σ must be N×N."))
-    (1 ≤ k ≤ N) || error("k must be between 1 and N.")
+    if do_checks
+        N > 0 || error("μ must be non-empty.")
+        size(Σ) == (N, N) || error("Σ must be N×N.")
+        (1 ≤ k ≤ N) || error("k must be between 1 and N.")
+        T ≥ 1 || error("T must be a positive integer.")
+
+        all(isfinite, μ) && all(isfinite, Σ) || error("Non-finite entries in μ or Σ.")
+
+        # lambda policy: positive, NON-INCREASING (duplicates allowed), dedup
+        if lambda !== nothing
+            all(isfinite, lambda) || error("`lambda` contains non-finite values.")
+            all(lambda .> 0)      || error("`lambda` must be strictly positive.")
+            any(diff(lambda) .> 0) && error("`lambda` must be non-increasing.")
+            lambda = unique(lambda)
+            length(lambda) > 0 || error("`lambda` is empty after removing duplicates.")
+        end
+
+        isfinite(epsilon) || error("epsilon must be finite.")
+        alpha ≥ 0 && alpha ≤ 1 || error("alpha must be in [0,1].")
+    end
 
     Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
     Q  = T .* (Matrix(Σs) .+ μ*μ')
-
-    # tiny bump for safety
-    τ = eps(Float64) * (tr(Q) / size(Q,1))
+    # non-negative, meaningful scale
+    μQ = max(mean(diag(Q)), eps(Float64))
+    τ  = eps(Float64) * μQ
     @inbounds for i in 1:N
         Q[i,i] += τ
     end

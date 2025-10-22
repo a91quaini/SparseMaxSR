@@ -49,12 +49,20 @@ _fmt_ks(v::Vector{Int}) = isempty(v) ? "(none)" : join(sort(unique(v)), ", ")
 
 # Exhaustive: (μ, Σ, k; exactly_k=true)
 function run_exhaustive(μ, Σ, k)
-    sel = w = nothing; sr = NaN; st = :UNKNOWN
+    sel = nothing; sr = NaN; st = :OK
     tsec = @elapsed begin
-        sel, w, sr, st = SparseMaxSR.mve_exhaustive_search(μ, Σ, k; exactly_k=true)
+        sel, sr = SparseMaxSR.mve_exhaustive_search(
+            μ, Σ;
+            k = k,
+            epsilon = SparseMaxSR.EPS_RIDGE,
+            stabilize_Σ = true,
+            do_checks = false,
+            enumerate_all = true
+        )
     end
-    return sel, w, sr, tsec, st
+    return sel, sr, tsec, st
 end
+
 
 # MIQP heuristic — VANILLA (no refit)
 # Spec: use band m=k-1..k, normalize_weights=false, MATLAB-like defaults.
@@ -68,14 +76,14 @@ function run_miqp_vanilla(μ, Σ, k)
             m = max(0, k-1),
             exactly_k = false,
             # bounds (optional; keep wide-open defaults)
-            fmin = fill(1e-6, length(μ)),
-            fmax = ones(length(μ)),
+            fmin = zeros(length(μ)), # fill(1e-6, length(μ)),
+            fmax = fill(0.5, length(μ)),
             # matlab-like controls
-            expand_rounds = 20,
-            expand_factor = 3.0,
-            expand_tol    = 1e-2,
-            mipgap        = 1e-4,   # keep modest tolerance
-            time_limit    = 200.0,
+            expand_rounds = 5,
+            expand_factor = 2.0,
+            expand_tol    = 5e-2,
+            mipgap        = 5e-3,   # keep modest tolerance
+            time_limit    = 60.0,
             threads       = max(Threads.nthreads()-1, 1),
             # stabilization & ridge
             epsilon       = SparseMaxSR.EPS_RIDGE,
@@ -99,13 +107,13 @@ function run_miqp_refit(μ, Σ, k)
             k = k,
             m = m = max(0, k-1),
             exactly_k = false,
-            fmin = fill(1e-6, length(μ)),
-            fmax = ones(length(μ)),
-            expand_rounds = 20,
-            expand_factor = 3.0,
-            expand_tol    = 1e-2,
+            fmin = zeros(length(μ)), # fill(1e-6, length(μ)),
+            fmax = fill(0.5, length(μ)), # ones(length(μ)),
+            expand_rounds = 5,
+            expand_factor = 2.0,
+            expand_tol    = 5e-2,
             mipgap        = 1e-4,
-            time_limit    = 200.0,
+            time_limit    = 60.0,
             threads       = max(Threads.nthreads()-1, 1),
             epsilon       = SparseMaxSR.EPS_RIDGE,
             stabilize_Σ   = true,
@@ -210,15 +218,15 @@ EXH_CAP = 3_000_000
 
 for k in ks
     # Exhaustive (guarded)
-    if binomial(N,k) ≤ EXH_CAP
+    if binomial(N, k) ≤ EXH_CAP
         try
-            _, _, sr, t, _ = run_exhaustive(μ, Σ, k)
-            cells[(k,"EXHAUSTIVE")] = cell(sr, t)
+            _, sr, t, _ = run_exhaustive(μ, Σ, k)
+            cells[(k, "EXHAUSTIVE")] = cell(sr, t)
         catch
-            cells[(k,"EXHAUSTIVE")] = "ERR"
+            cells[(k, "EXHAUSTIVE")] = "ERR"
         end
     else
-        cells[(k,"EXHAUSTIVE")] = "SKIP"
+        cells[(k, "EXHAUSTIVE")] = "SKIP"
     end
 
     # LASSO-VANILLA

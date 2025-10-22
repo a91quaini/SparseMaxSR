@@ -1,10 +1,10 @@
 # test/test-MIQPHeuristicSearch.jl
-# Tests for mve_miqp_heuristic_search with refit toggle, exactly_k, bounds, and normalization.
+# Tests for mve_miqp_heuristic_search with refit toggle, exactly_k, bounds, normalization,
+# indicator linking, budget feasibility screen, and expansion no-op behavior.
 #
-# This suite assumes:
-# - normalize_weights=false ⇒ NO budget constraint is imposed in the MIQP.
-# - normalize_weights=true  ⇒ the MIQP imposes a unit-sum budget (∑w=1) and outputs are
-#   post-normalized via Utils.normalize_weights (which is identity when ∑w=1).
+# Assumptions preserved:
+# - normalize_weights=false ⇒ NO budget constraint in the MIQP.
+# - normalize_weights=true  ⇒ MIQP imposes ∑w=1; outputs are post-normalized via Utils.normalize_weights.
 # - Refit computes MVE weights/SR on the returned selection using the call's stabilization choice.
 #
 using Test, Random, LinearAlgebra, Statistics
@@ -62,16 +62,15 @@ const ATOL_W  = 1e-12
         supp = sum(abs.(res.weights) .> 1e-12)
         @test m ≤ supp ≤ k
 
-        # box bounds respected
+        # box bounds respected (nonnegativity here because fmin ≥ 0)
         @test all(res.weights .≤ fmax .+ 1e-12)
-        @test all(res.weights .≥ -1e-12)  # since fmin ≥ 0
+        @test all(res.weights .≥ -1e-12)
 
         # SR consistency with same stabilization choice (false)
         @test abs(_sr_internal(res.weights, μ, Σ; epsilon=0.0) - res.sr) ≤ 1e-7
     end
 
     @testset "normalize_weights: cross-problem comparisons removed; check invariants per-solve" begin
-        # normalize_weights changes the feasible region ⇒ r0 and r1 are not directly comparable.
         Random.seed!(1337)
         n, k, m = 10, 4, 1
         μ = 0.02 .+ 0.04 .* rand(n)
@@ -370,6 +369,89 @@ const ATOL_W  = 1e-12
         @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=2, fmin=[0.0], do_checks=true)
         @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=2, fmax=[1.0], do_checks=true)
         @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=2, fmin=[0.2, 0.3], fmax=[0.1, 0.4], do_checks=true)
+    end
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # NEW: Indicator-linking stress with shorting (negative fmin)
+    # ──────────────────────────────────────────────────────────────────────────
+    @testset "indicator linking with shorting (non-refit, normalize_weights=false)" begin
+        Random.seed!(4545)
+        n, k, m = 8, 4, 1
+        μ = -0.01 .+ 0.04 .* rand(n)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.05I)
+
+        # allow shorting on half of the names
+        fmin = fill(-0.3, n); fmin[1:div(n,2)] .= -0.5
+        fmax = fill( 0.6, n); fmax[1:div(n,2)] .=  0.4
+
+        r = mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
+                                      fmin=fmin, fmax=fmax,
+                                      stabilize_Σ=false, compute_weights=true,
+                                      use_refit=false, threads=1,
+                                      exactly_k=false, normalize_weights=false)
+
+        x = r.weights
+        # infer selection from weights (v=0 ⇒ x=0 exactly by indicator; allow tiny tol)
+        sel = findall(abs.(x) .> 1e-12)
+        @test length(sel) ≥ m && length(sel) ≤ k
+        # bounds respected on active names; zeros off support
+        for i in 1:n
+            if i ∈ sel
+                @test x[i] ≤ fmax[i] + 1e-12
+                @test x[i] ≥ fmin[i] - 1e-12
+            else
+                @test abs(x[i]) ≤ 1e-12
+            end
+        end
+        @test isfinite(r.sr)
+    end
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # NEW: Budget feasibility quick screen (normalize_weights=true + do_checks=true)
+    # ──────────────────────────────────────────────────────────────────────────
+    @testset "budget feasibility pre-screen triggers error when caps make ∑x=1 impossible" begin
+        # Make it provably impossible: N small and sum of max caps < 1
+        n, k, m = 5, 4, 1
+        μ = 0.01 .+ 0.02 .* rand(n)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.02I)
+        fmin = zeros(n)
+        fmax = fill(0.10, n)  # total max ≤ 0.5
+
+        @test_throws ErrorException mve_miqp_heuristic_search(μ, Σ; k=k, m=m, γ=1.0,
+                                                              fmin=fmin, fmax=fmax,
+                                                              normalize_weights=true,
+                                                              do_checks=true,
+                                                              stabilize_Σ=false,
+                                                              use_refit=false, threads=1)
+    end
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # NEW: No-op expansion (when nothing is near bounds, extra rounds don't change result)
+    # ──────────────────────────────────────────────────────────────────────────
+    @testset "no-op expansion: expand_rounds>0 equals expand_rounds=0 when bounds are slack" begin
+        Random.seed!(1212)
+        n, k = 10, 4
+        μ = 0.02 .+ 0.03 .* rand(n)
+        A = randn(n, n); Σ = Symmetric(A*A' + 0.07I)
+        # very loose bounds
+        fmin = fill(-10.0, n)
+        fmax = fill( 10.0, n)
+
+        r0 = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
+                                       fmin=fmin, fmax=fmax,
+                                       expand_rounds=0, stabilize_Σ=false,
+                                       use_refit=false, threads=1,
+                                       exactly_k=true, normalize_weights=false)
+
+        r5 = mve_miqp_heuristic_search(μ, Σ; k=k, γ=1.0,
+                                       fmin=fmin, fmax=fmax,
+                                       expand_rounds=5, stabilize_Σ=false,
+                                       use_refit=false, threads=1,
+                                       exactly_k=true, normalize_weights=false)
+
+        @test r0.selection == r5.selection
+        @test isapprox(r0.sr, r5.sr; atol=1e-12, rtol=0)
+        @test isapprox(r0.weights, r5.weights; atol=1e-12, rtol=0)
     end
 
     @testset "time_limit: finite SR with tight budget (mode-agnostic)" begin

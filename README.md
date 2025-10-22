@@ -1,34 +1,54 @@
 # SparseMaxSR.jl
 
-SparseMaxSR is a Julia package for **mean–variance portfolio selection under cardinality constraints**.
-It provides a consistent and efficient framework to estimate **sparse maximum‑Sharpe portfolios**, i.e., portfolios composed of at most or exactly *k* assets out of *N*, while preserving the mean–variance efficient (MVE) structure.
-
-Mathematically, the goal is to solve the **sparse Sharpe‑maximization problem**
-
-$$
-\max_{w\in\mathbb{R}^N} \frac{w'\mu}{\sqrt{w'\Sigma w}}
-\quad \text{s.t.}\quad \|w\|_0 \le k,
-$$
-
-where  
-- $\mu\in\mathbb{R}^N$ is the vector of expected excess returns,  
-- $\Sigma\in\mathbb{R}^{N\times N}$ is the covariance matrix of returns, and  
-- $\|w\|_0$ counts the number of nonzero elements in $w$.
-
-The package implements several **complementary search strategies**:
-
-1. **Exhaustive / Random Search** — exact or stochastic enumeration of supports of size *k* (feasible for small *N*).  
-2. **LASSO Relaxation Search** — continuous relaxation via LASSO/Elastic‑Net regression, followed by optional MVE refit.  
-3. **MIQP Heuristic Search** — mixed‑integer quadratic programming heuristic via JuMP/CPLEX, supporting cardinality bounds and warm starts.  
-
-All methods share a unified interface and numerical backend (`SharpeRatio` module).  
-They can be used for empirical comparisons, replication studies, and large‑scale simulation of high‑dimensional portfolio selection.
+**SparseMaxSR** is a Julia package for *mean–variance efficient (MVE)* portfolio selection under **cardinality constraints**.  
+It provides unified, numerically robust tools to estimate **sparse maximum-Sharpe portfolios**, i.e., portfolios composed of at most or exactly *k* assets out of *N*, while preserving the classical mean–variance structure.
 
 ---
 
-## Installation
+## 1. Problem statement
 
-### Option A — develop locally (recommended)
+We seek to solve the *sparse Sharpe-maximization problem*:
+
+\[
+\max_{w\in\mathbb{R}^N} 
+\frac{w' \mu}{\sqrt{w' \Sigma w}}
+\quad \text{s.t.} \quad \|w\|_0 \le k,
+\]
+
+where  
+
+- \( \mu \in \mathbb{R}^N \): vector of expected excess returns,  
+- \( \Sigma \in \mathbb{R}^{N\times N} \): covariance matrix of returns,  
+- \( \|w\|_0 \): number of nonzero elements in \(w\) (sparsity).  
+
+The MVE (mean–variance efficient) benchmark portfolio without sparsity is
+
+\[
+w^{\text{MVE}} = \Sigma^{-1}\mu, \qquad
+SR_{\text{MVE}} = \sqrt{\mu'\Sigma^{-1}\mu}.
+\]
+
+SparseMaxSR provides algorithms that approximate this solution when the support size is restricted.
+
+---
+
+## 2. Methods implemented
+
+SparseMaxSR offers three complementary approaches, all sharing a unified API:
+
+| Method | Description | Typical use |
+|:--------|:-------------|:-------------|
+| **Exhaustive / Random Search** | Enumerates or samples subsets of size *k* and selects the one with maximal in-sample MVE Sharpe ratio. | Small N (≤ 30–40) or validation of heuristics. |
+| **LASSO Relaxation Search** | Solves a continuous relaxation via **Elastic-Net (GLMNet)** regression; selects the largest support ≤ *k* and optionally refits exact MVE weights. | Large N, fast approximation. |
+| **MIQP Heuristic Search** | Mixed-integer quadratic heuristic via **JuMP + CPLEX**, with optional cardinality band and progressive bound expansion. | Medium/large N; high accuracy with time control. |
+
+All methods call the shared low-level routines in the [`SharpeRatio`](#sharperatio-module) and [`Utils`](#utils-module) modules for stable covariance handling and Sharpe computation.
+
+---
+
+## 3. Installation
+
+### Option A — local development
 
 ```julia
 julia> using Pkg
@@ -37,7 +57,7 @@ julia> Pkg.develop(path="/path/to/SparseMaxSR")
 julia> using SparseMaxSR
 ```
 
-### Option B — add from Git
+### Option B — clone from Git
 
 ```julia
 julia> using Pkg
@@ -45,226 +65,279 @@ julia> Pkg.add(url="https://github.com/<org>/SparseMaxSR.jl")
 julia> using SparseMaxSR
 ```
 
-> Add solver back‑ends (e.g. `CPLEX`, `HiGHS`, `MosekTools`, `SCS`) to your environment as needed.
+> Add solver backends (`CPLEX`, `HiGHS`, `MosekTools`, `SCS`, etc.) to your environment as required.
 
 ---
 
-## Dependencies
+## 4. Dependencies
 
-Core modules:
-
-- `LinearAlgebra`, `Statistics`, `Random` — numerical primitives  
-- `Combinatorics` — support enumeration  
-- `JuMP`, `MathOptInterface` — MIQP formulation  
-- `GLMNet` — LASSO / Elastic‑Net relaxation  
-- `CPLEX` — MIQP heuristic backend
+| Dependency | Purpose |
+|:------------|:---------|
+| `LinearAlgebra`, `Statistics`, `Random` | Core numerical routines |
+| `Combinatorics` | Exhaustive and random subset generation |
+| `GLMNet` | LASSO / Elastic-Net path solver |
+| `JuMP`, `MathOptInterface`, `CPLEX` | MIQP heuristic search |
 
 ---
 
-## Exported API (overview)
+## 5. Exported API
 
-All high‑level functions return **named tuples** `(selection, weights, sr, status)`:
+All main routines return **named tuples** `(selection, weights, sr, status)` or `(selection, sr)` depending on context.
 
 | Field | Meaning |
-|:------|:--------|
-| `selection` | Indices of selected assets (support set). |
-| `weights` | Portfolio weights (full vector, zeros outside support). |
-| `sr` | Sharpe ratio achieved by `weights`. |
-| `status` | Symbolic solver status (`:OK`, `:LASSO_PATH_EXACT_K`, `:EXHAUSTIVE_SAMPLED`, etc.). |
+|:------|:---------|
+| `selection` | Vector of indices of selected assets |
+| `weights` | Portfolio weights (zeros off-support) |
+| `sr` | In-sample Sharpe ratio |
+| `status` | Symbol describing solver outcome (`:OK`, `:LASSO_PATH_EXACT_K`, etc.) |
 
 ---
 
-### `compute_sr`
+### 🔹 SharpeRatio module
+
+#### `compute_sr`
 
 ```julia
 compute_sr(w::AbstractVector, μ::AbstractVector, Σ::AbstractMatrix;
+           selection::AbstractVector{<:Integer}=Int[],
            epsilon::Real=EPS_RIDGE,
            stabilize_Σ::Bool=true,
-           do_checks::Bool=false) -> Real
+           do_checks::Bool=false) -> Float64
 ```
 
-Compute the Sharpe ratio of a given weight vector `w`.
+Computes the Sharpe ratio of a given portfolio:
 
-**Formula**
+\[
+SR(w) = \frac{w' \mu}{\sqrt{w' (\Sigma + \epsilon I) w}}.
+\]
 
-$$
-SR(w) = \frac{w'\mu}{\sqrt{w'(\Sigma + \epsilon I)w}},
-$$
-
-where a ridge term $\epsilon I$ is added if `stabilize_Σ=true`.
-
-| Argument | Type | Default | Description |
-|:----------|:------|:---------|:-------------|
-| `w` | Vector | — | Portfolio weights |
-| `μ` | Vector | — | Expected returns |
-| `Σ` | Matrix | — | Covariance matrix |
-| `epsilon` | Real | `EPS_RIDGE` | Ridge regularization magnitude |
-| `stabilize_Σ` | Bool | `true` | Whether to apply ridge stabilization |
-| `do_checks` | Bool | `false` | Validate dimensions and finiteness |
+If `selection` is provided, only those indices contribute to the numerator and denominator.  
+Returns `NaN` when variance ≤ 0 or not finite.
 
 ---
 
-### `compute_mve_sr`
+#### `compute_mve_sr`
 
 ```julia
 compute_mve_sr(μ::AbstractVector, Σ::AbstractMatrix;
                selection::AbstractVector{<:Integer}=Int[],
                epsilon::Real=EPS_RIDGE,
                stabilize_Σ::Bool=true,
-               do_checks::Bool=false) -> Real
+               do_checks::Bool=false) -> Float64
 ```
 
-Computes the **maximum Sharpe ratio** achievable by the **mean‑variance efficient (MVE)** portfolio restricted to a subset of assets.
+Computes the **maximum Sharpe ratio** of the *mean–variance efficient* portfolio on a given subset:
 
-If `selection` is empty, all assets are used.
+\[
+SR^*(S) = \sqrt{ \mu_S' \Sigma_S^{-1} \mu_S }.
+\]
 
-| Argument | Type | Default | Description |
-|:----------|:------|:---------|:-------------|
-| `μ`, `Σ` | see above | — | Mean and covariance |
-| `selection` | Vector{Int} | `Int[]` | Indices of active assets |
-| `epsilon`, `stabilize_Σ`, `do_checks` | — | — | Same as above |
+When `selection` is empty, the full MVE SR is returned.
 
 ---
 
-### `compute_mve_weights`
+#### `compute_mve_weights`
 
 ```julia
 compute_mve_weights(μ::AbstractVector, Σ::AbstractMatrix;
                     selection::AbstractVector{<:Integer}=Int[],
+                    normalize_weights::Bool=false,
                     epsilon::Real=EPS_RIDGE,
                     stabilize_Σ::Bool=true,
-                    weights_sum1::Bool=false,
                     do_checks::Bool=false) -> Vector{Float64}
 ```
 
-Returns the MVE weights corresponding to the subset `selection` (zeros elsewhere).  
-If `weights_sum1=true`, weights are rescaled using `Utils.normalize_weights` so that $|\sum_i w_i|≈1$.
+Computes MVE weights \( w = \Sigma^{-1}\mu \) (restricted to the chosen support if provided).  
+If `normalize_weights=true`, scales weights by `Utils.normalize_weights(w)` to avoid degenerate magnitudes.  
+Normalization does **not** affect Sharpe ratios (scale-invariant).
 
 ---
 
-### `mve_exhaustive_search`
+### 🔹 ExhaustiveSearch module
+
+#### `mve_exhaustive_search`
 
 ```julia
-mve_exhaustive_search(μ::AbstractVector, Σ::AbstractMatrix, k::Integer;
-    exactly_k::Bool=true,
-    max_samples_per_k::Int=0,
-    max_combinations::Int=10_000_000,
-    epsilon::Real=EPS_RIDGE,
-    rng::AbstractRNG=Random.default_rng(),
-    γ::Real=1.0,
-    stabilize_Σ::Bool=true,
-    compute_weights::Bool=false,
-    weights_sum1::Bool=false,
-    do_checks::Bool=false)
+mve_exhaustive_search(μ::AbstractVector, Σ::AbstractMatrix;
+                      k::Integer,
+                      epsilon::Real=EPS_RIDGE,
+                      stabilize_Σ::Bool=true,
+                      do_checks::Bool=false,
+                      enumerate_all::Bool=true,
+                      max_samples::Int=0,
+                      dedup_samples::Bool=true,
+                      rng::AbstractRNG=Random.GLOBAL_RNG)
+    -> Tuple{Vector{Int}, Float64}
 ```
 
-Performs exhaustive or sampled search over all supports up to size `k`, selecting the one that maximizes `compute_mve_sr`.
+Enumerates or samples subsets of size `k`, returning the best subset and its MVE Sharpe ratio.  
+For feasible `N choose k`, set `enumerate_all=true`; otherwise, provide `max_samples`.
 
-| Argument | Type | Default | Description |
-|:----------|:------|:---------|:-------------|
-| `μ`, `Σ`, `k` | — | — | Inputs and target sparsity |
-| `exactly_k` | Bool | `true` | Restrict to supports of size `k` |
-| `max_samples_per_k` | Int | `0` | Number of random supports per size (`0` → full enumeration) |
-| `max_combinations` | Int | `10_000_000` | Safety cap on total combinations |
-| `compute_weights` | Bool | `false` | Whether to return MVE weights |
-| `weights_sum1` | Bool | `false` | Normalize weights (|∑w|≈1) |
-| `status` | Symbol | — | Indicates whether full enumeration or sampling was used |
+| Argument | Description |
+|:----------|:-------------|
+| `μ`, `Σ` | Mean and covariance |
+| `k` | Target subset size |
+| `enumerate_all` | Enumerate all combinations (true) or sample |
+| `max_samples` | Number of samples if not enumerating |
+| `dedup_samples` | Ensure sampled supports are unique |
+| `rng` | Random number generator |
+| `epsilon`, `stabilize_Σ`, `do_checks` | Numerical options |
+
+Returns `(selection, sr)`.
 
 ---
 
-### `mve_lasso_relaxation_search`
+#### `mve_exhaustive_search_gridk`
 
 ```julia
-mve_lasso_relaxation_search(μ::AbstractVector, Σ::AbstractMatrix, T::Integer;
-    k::Integer,
-    nlambda::Int=100,
-    lambda_min_ratio::Real=1e-3,
-    alpha::Real=0.95,
-    standardize::Bool=false,
-    epsilon::Real=EPS_RIDGE,
-    stabilize_Σ::Bool=true,
-    compute_weights::Bool=true,
-    use_refit::Bool=true,
-    weights_sum1::Bool=false,
-    do_checks::Bool=false)
+mve_exhaustive_search_gridk(μ::AbstractVector, Σ::AbstractMatrix;
+                            k_grid::AbstractVector{<:Integer},
+                            epsilon::Real=EPS_RIDGE,
+                            stabilize_Σ::Bool=true,
+                            do_checks::Bool=false,
+                            enumerate_all::Bool=true,
+                            max_samples_per_k::Int=0,
+                            dedup_samples::Bool=true,
+                            rng::AbstractRNG=Random.GLOBAL_RNG)
+    -> Dict{Int,Tuple{Vector{Int},Float64}}
 ```
 
-Applies a **LASSO / Elastic‑Net relaxation** of the MVE problem, using GLMNet to trace the regularization path.  
-It picks the largest support of size ≤ `k` and optionally recomputes exact MVE weights.
+Evaluates the exhaustive search for multiple `k` values using a shared stabilized covariance.  
+Each entry of the returned dictionary maps `k ⇒ (selection, sr)`.
 
-| Argument | Type | Default | Description |
-|:----------|:------|:---------|:-------------|
-| `T` | Int | — | Number of observations (used for normalization) |
-| `k` | Int | — | Desired maximum support size |
-| `nlambda` | Int | `100` | Number of λ grid points |
-| `lambda_min_ratio` | Real | `1e-3` | Smallest λ relative to λ_max |
-| `alpha` | Real | `0.95` | Elastic‑Net mixing (1.0 = LASSO) |
-| `standardize` | Bool | `false` | Standardize regressors |
-| `use_refit` | Bool | `true` | Recompute MVE weights on selected support |
-| `weights_sum1` | Bool | `false` | Normalize final weights |
-| `compute_weights` | Bool | `true` | Return portfolio weights (vs support only) |
+---
+
+### 🔹 LassoRelaxationSearch module
+
+#### `mve_lasso_relaxation_search`
+
+```julia
+mve_lasso_relaxation_search(R::AbstractMatrix{<:Real};
+                            k::Integer,
+                            y::Union{Nothing,AbstractVector{<:Real}}=nothing,
+                            nlambda::Int=100,
+                            lambda_min_ratio::Real=1e-3,
+                            alpha::Real=0.95,
+                            standardize::Bool=false,
+                            epsilon::Real=EPS_RIDGE,
+                            stabilize_Σ::Bool=true,
+                            compute_weights::Bool=false,
+                            normalize_weights::Bool=false,
+                            use_refit::Bool=true,
+                            do_checks::Bool=false)
+    -> NamedTuple{(:selection,:weights,:sr,:status)}
+```
+
+**Path-based Elastic-Net relaxation** of the sparse MVE problem:
+
+1. Fits GLMNet path \( y = R \beta + \varepsilon \).
+2. Chooses the largest support ≤ `k`.
+3. Either:
+   - `use_refit=true`: compute exact MVE SR and refit weights on the selected support;  
+   - `use_refit=false`: return the raw or normalized LASSO coefficients.
 
 **Statuses**:  
 `:LASSO_PATH_EXACT_K`, `:LASSO_PATH_ALMOST_K`, `:LASSO_ALLEMPTY`.
 
 ---
 
-### `mve_miqp_heuristic_search`
+### 🔹 MIQPHeuristicSearch module
+
+#### `mve_miqp_heuristic_search`
 
 ```julia
 mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
-    k::Integer,
-    m::Integer=max(0,k-1),
-    γ::Real=1.0,
-    fmin::AbstractVector=zeros(length(μ)),
-    fmax::AbstractVector=ones(length(μ)),
-    expand_rounds::Int=20,
-    expand_factor::Float64=3.0,
-    expand_tol::Float64=1e-2,
-    mipgap::Real=1e-4,
-    time_limit::Real=200.0,
-    threads::Int=1,
-    exactly_k::Bool=false,
-    compute_weights::Bool=true,
-    use_refit::Bool=false,
-    weights_sum1::Bool=false,
-    epsilon::Real=EPS_RIDGE,
-    stabilize_Σ::Bool=true,
-    do_checks::Bool=false,
-    x_start::AbstractVector=nothing,
-    v_start::AbstractVector=nothing)
+                          k::Integer,
+                          exactly_k::Bool=false,
+                          m::Union{Int,Nothing}=nothing,
+                          γ::Float64=1.0,
+                          fmin::AbstractVector=zeros(length(μ)),
+                          fmax::AbstractVector=ones(length(μ)),
+                          expand_rounds::Int=20,
+                          expand_factor::Float64=3.0,
+                          expand_tol::Float64=1e-2,
+                          mipgap::Float64=1e-4,
+                          time_limit::Real=200,
+                          threads::Int=0,
+                          compute_weights::Bool=false,
+                          normalize_weights::Bool=false,
+                          use_refit::Bool=true,
+                          verbose::Bool=false,
+                          epsilon::Real=EPS_RIDGE,
+                          stabilize_Σ::Bool=true,
+                          do_checks::Bool=false)
 ```
 
-A JuMP/CPLEX‑based heuristic that approximates the cardinality‑constrained MVE solution via MIQP.  
-The algorithm alternates between mixed‑integer search and local expansion rounds to escape local minima.
+Heuristic mixed-integer quadratic programming (MIQP) solver for sparse MVE selection.  
+The optimization problem is:
 
-| Argument | Type | Default | Description |
-|:----------|:------|:---------|:-------------|
-| `k` | Int | — | Upper cardinality bound |
-| `m` | Int | `max(0,k-1)` | Lower cardinality bound |
-| `γ` | Real | `1.0` | Risk‑aversion coefficient in objective |
-| `expand_rounds` | Int | `20` | Number of heuristic expansion passes |
-| `expand_factor` | Float | `3.0` | Search radius multiplier |
-| `expand_tol` | Float | `1e-2` | Expansion tolerance |
-| `mipgap` | Real | `1e-4` | MILP relative optimality gap |
-| `time_limit` | Real | `200.0` | Solver time limit (seconds) |
-| `threads` | Int | `1` | Parallel threads |
-| `exactly_k` | Bool | `false` | Enforce |S|=k |
-| `use_refit` | Bool | `false` | Refit exact MVE weights |
-| `weights_sum1` | Bool | `false` | Normalize |∑w|≈1 |
-| `x_start`, `v_start` | Vector | `nothing` | Warm starts for continuous and binary variables |
+\[
+\min_{x,v} \frac{1}{2}\, \gamma\, x'\Sigma_s x - \mu'x
+\quad \text{s.t.}\quad
+m \le \sum_i v_i \le k,\;
+v_i=0 \Rightarrow x_i=0,\;
+v_i=1 \Rightarrow f_{\min,i}\!\le\!x_i\!\le\!f_{\max,i}.
+\]
+
+If `normalize_weights=true`, adds a budget constraint ∑x = 1 and rescales outputs.
+
+Key options:
+- `expand_rounds`, `expand_factor`, `expand_tol`: progressive bound-expansion heuristic  
+- `mipgap`, `time_limit`: CPLEX tolerances  
+- `use_refit`: recompute exact MVE SR/weights on final support  
+- `normalize_weights`: toggles ∑x=1 and post-normalization
+
+Returns `(selection, weights, sr, status)`.
 
 ---
 
-## Example
+### 🔹 Utils module
 
-The `example.jl` script compares all methods (Exhaustive, LASSO, MIQP) on simulated two‑factor returns.
-Run:
+#### `normalize_weights`
+
+```julia
+normalize_weights(w::AbstractVector;
+                  mode::Symbol=:relative,
+                  tol::Real=1e-6,
+                  do_checks::Bool=false) -> Vector{Float64}
+```
+
+Returns a stably normalized version of `w`:
+
+- `mode=:relative` → divide by `max(|∑w|, tol·‖w‖₁, 1e-10)` (default, scale-safe).  
+- `mode=:absolute` → divide by `max(|∑w|, tol, 1e-10)` (forces |∑w|≈1).
+
+If both the sum and L1-norm are ≈ 0, returns a zero vector.
+
+---
+
+## 6. Example usage
+
+The included [`example.jl`](example.jl) script compares all methods on simulated two-factor returns:
 
 ```bash
 julia --project=. example.jl
 ```
 
-It prints Sharpe ratios and timing for each k grid.
+Example output:
+
+```
+Results — Experiment A (T=500, N=30)
+------------------------------------
+k      | EXHAUSTIVE         | LASSO-VANILLA      | LASSO-REFIT        | MIQP-VANILLA       | MIQP-REFIT
+-----------------------------------------------------------------------------------------------------
+1      | 0.1538 / 0.00s     | 0.1538 / 0.00s     | 0.1538 / 0.00s     | 0.1538 / 4.7s      | 0.1538 / 0.2s
+3      | 0.1962 / 0.07s     | 0.1760 / 0.00s     | 0.1945 / 0.00s     | 0.1930 / 3.1s      | 0.1955 / 0.6s
+...
+```
+
+---
+
+## 7. References
+
+- Markowitz (1952): *Portfolio Selection*.  
+- Brodie et al. (2009): *Sparse Portfolio Selection via LASSO*.  
+- Bertsimas & King (2016): *OR Methods in Portfolio Optimization*.  
+- Quaini (2025): *Sparse Maximum-Sharpe Heuristics in Julia* (forthcoming working paper).
 
 ---

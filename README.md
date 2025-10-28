@@ -192,37 +192,86 @@ Returns `(selection, sr)`.
 
 ---
 
-### 🔹 LassoRelaxationSearch module
+### LassoRelaxationSearch
 
-#### `mve_lasso_relaxation_search`
+The `LassoRelaxationSearch` module implements **LASSO and Elastic‑Net relaxations** of the sparse maximum‑Sharpe portfolio problem.  
+It provides two main entry points:
+
+---
+
+#### `mve_lasso_relaxation_search(R::AbstractMatrix; k::Int, α::Union{Float64,Vector{Float64}}=1.0, use_refit::Bool=false, ...)`
+
+Perform sparse mean‑variance efficient (MVE) portfolio selection via a **LASSO/Elastic‑Net relaxation** using the *returns matrix* \( R \in \mathbb{R}^{T \times N} \).
+
+##### Arguments
+
+- `R::Matrix{Float64}` — matrix of excess returns (rows = time, columns = assets).  
+- `k::Int` — target support size.  
+- `α::Union{Float64,Vector{Float64}}=1.0` — Elastic‑Net mixing parameter(s):  
+  - `α=1.0` → pure LASSO;  
+  - `α<1.0` → Elastic‑Net penalty.  
+  - If a **vector** of α values is passed, *cross‑validation* is performed automatically.  
+- `use_refit::Bool=false` — if `true`, the final weights are recomputed by refitting the exact MVE solution on the selected support.  
+- `nlambda::Int=100` — number of λ values used internally by GLMNet.  
+- `lambda_min_ratio::Float64=1e-3` — ratio λₘᵢₙ / λₘₐₓ.  
+- `standardize::Bool=false` — whether to standardize predictors (columns of `R`).  
+- `normalize_weights::Bool=false` — whether to normalize the final weights to sum to one.  
+- `weights_sum1::Bool=false` — if `true`, enforces \(\sum_i w_i = 1\) in the refit step.  
+- `epsilon::Float64` — ridge‑style regularization constant for numerical stability.  
+- `stabilize_Σ::Bool` — whether to stabilize the sample covariance before inversion.  
+- `do_checks::Bool=false` — perform argument and dimension checks.  
+- `cv_folds::Int=5` — number of folds for α‑grid cross‑validation (if α is a vector).  
+- `cv_verbose::Bool=false` — print cross‑validation progress.
+
+##### Returns
+
+A named tuple with fields:
 
 ```julia
-mve_lasso_relaxation_search(R::AbstractMatrix{<:Real};
-                            k::Integer,
-                            y::Union{Nothing,AbstractVector{<:Real}}=nothing,
-                            nlambda::Int=100,
-                            lambda_min_ratio::Real=1e-3,
-                            alpha::Real=0.95,
-                            standardize::Bool=false,
-                            epsilon::Real=EPS_RIDGE,
-                            stabilize_Σ::Bool=true,
-                            compute_weights::Bool=false,
-                            normalize_weights::Bool=false,
-                            use_refit::Bool=true,
-                            do_checks::Bool=false)
-    -> NamedTuple{(:selection,:weights,:sr,:status)}
+(selection = Vector{Int},
+ weights    = Vector{Float64},
+ sr         = Float64,
+ status     = Symbol,
+ alpha      = Float64)
 ```
 
-**Path‑based Elastic‑Net relaxation** of the sparse MVE problem:
+where  
+- `selection` is the index set of chosen assets,  
+- `weights` are the corresponding portfolio weights,  
+- `sr` is the in‑sample Sharpe ratio,  
+- `status` is one of:
+  - `:OK` — valid selection and Sharpe ratio;
+  - `:LASSO_PATH_ALMOST_K` — best model had fewer than `k` active coefficients;
+  - `:LASSO_ALLEMPTY` — all coefficients were zero;
+- `alpha` is the chosen α (either the input value or the CV‑selected optimum).
 
-1. Fits GLMNet path $y = R\beta + \varepsilon$.  
-2. Chooses the largest support ≤ `k`.  
-3. Either:  
-   - `use_refit=true`: compute exact MVE SR and refit weights on the selected support;  
-   - `use_refit=false`: return the raw or normalized LASSO coefficients.
+---
 
-**Statuses**:  
-`:LASSO_PATH_EXACT_K`, `:LASSO_PATH_ALMOST_K`, `:LASSO_ALLEMPTY`.
+#### `mve_lasso_relaxation_search(μ::Vector, Σ::Matrix, T::Int; R::Union{Nothing,Matrix}=nothing, α::Union{Float64,Vector{Float64}}=1.0, ...)`
+
+Moment‑based entry point (using **estimated moments** instead of raw returns).  
+This function provides identical functionality but allows passing sample moments directly.
+
+##### Arguments
+
+- `μ::Vector{Float64}` — mean vector of returns.  
+- `Σ::Matrix{Float64}` — covariance matrix of returns.  
+- `T::Int` — effective sample size.  
+- `R::Union{Nothing,Matrix}=nothing` — optional returns matrix.  
+  If provided, α‑grid CV is performed across the values in `α`.  
+- All remaining keyword arguments are identical to the previous method.
+
+##### Returns
+
+Same named tuple as above.
+
+---
+
+##### Notes
+
+- When multiple α values are provided, `mve_lasso_relaxation_search` internally performs **cross‑validation** on `R` to select the α yielding the highest out‑of‑sample Sharpe ratio, and reports that α in the output field `alpha`.  
+- Setting `use_refit=true` recomputes the exact MVE weights restricted to the selected support, using `compute_mve_weights` internally.  
+- The LASSO and refit procedures can be used for grid experiments over both support size `k` and α to approximate the sparse maximum‑Sharpe frontier efficiently.
 
 ---
 

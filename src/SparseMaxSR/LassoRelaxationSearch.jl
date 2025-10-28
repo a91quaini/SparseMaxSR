@@ -9,40 +9,158 @@ using ..SharpeRatio
 export mve_lasso_relaxation_search
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Internal helpers
+# Internal helpers (clarity + robustness + fewer allocations)
 # ═════════════════════════════════════════════════════════════════════════════
 
 """
     _safe_chol(Q; base_bump=1e-10, max_tries=8) -> Cholesky
 
-Robust Cholesky with escalating diagonal bump. Tries
-`Q + τ I, Q + 2τ I, Q + 4τ I, …` up to `max_tries`.
+Robust Cholesky with escalating diagonal bump: tries
+`Q + τ I, Q + 2τ I, Q + 4τ I, …` up to `max_tries`. Deterministic.
 """
 function _safe_chol(Q::AbstractMatrix; base_bump=1e-10, max_tries=8)
-    τ = base_bump * (tr(Q) / size(Q, 1))
-    for t in 0:max_tries
+    n = size(Q,1)
+    τ0 = base_bump * max(tr(Q) / max(n,1), eps(Float64))
+    @inbounds for t in 0:max_tries
+        τ = τ0 * (2.0^t)
         try
-            return cholesky(Symmetric(Q + (τ * 2.0^t) * I))
+            return cholesky(Symmetric(Q + τ * I))
         catch
-            # escalate bump and retry
+            # keep escalating
         end
     end
-    error("Cholesky failed after $(max_tries + 1) bumps.")
+    error("Cholesky failed after $(max_tries + 1) diagonal bumps.")
+end
+
+@inline function _validate_lambda!(lambda)
+    if lambda === nothing
+        return nothing
+    end
+    all(isfinite, lambda) || error("`lambda` contains non-finite values.")
+    all(lambda .> 0)      || error("`lambda` must be strictly positive.")
+    # enforce non-increasing order deterministically
+    sort!(lambda; rev=true)
+    unique!(lambda)
+    !isempty(lambda) || error("`lambda` is empty after removing duplicates.")
+    return lambda
+end
+
+@inline function _alpha_mode(alpha)
+    if alpha isa AbstractVector
+        # deterministic, sanitized grid for CV
+        agrid = unique(sort(Float64.(alpha)))
+        return true, agrid
+    else
+        return false, Float64[float(alpha)]
+    end
+end
+
+@inline function _moments_from_R(R::AbstractMatrix)
+    @views μ = vec(mean(R; dims=1))
+    @views Σ = cov(R; corrected=true)
+    return μ, Σ
+end
+
+# ── Shared input validators ──────────────────────────────────────────────────
+
+"""
+    _validate_R_based_inputs!(R, k, y, epsilon, alpha, lambda, do_checks, cv_folds)
+        -> (lambda, is_grid, agrid::Vector{Float64}, alpha_used::Float64)
+
+Centralizes argument checks for the R-based public API when `do_checks=true`.
+Keeps legacy semantics: allow k ∈ [0, N].
+"""
+function _validate_R_based_inputs!(
+    R::AbstractMatrix{<:Real},
+    k::Integer,
+    y,
+    epsilon::Real,
+    alpha,
+    lambda,
+    do_checks::Bool,
+    cv_folds::Int
+)
+    T, N = size(R)
+    is_grid, agrid = _alpha_mode(alpha)
+    alpha_used = agrid[1]
+
+    if do_checks
+        T > 1 || error("R must have at least 2 rows.")
+        N > 0 || error("R must have at least 1 column.")
+        (0 ≤ k ≤ N) || error("k must be between 0 and N.")
+        if y !== nothing
+            length(y) == T || error("Length of y must equal number of rows of R.")
+            all(isfinite, y) || error("y contains non-finite values.")
+        end
+        isfinite(epsilon) || error("epsilon must be finite.")
+        if is_grid
+            all(0.0 .≤ agrid .≤ 1.0) || error("alpha grid must be within [0,1].")
+            length(agrid) ≥ 2 || error("Provide ≥ 2 alpha values to cross-validate.")
+            # basic feasibility of folds
+            seg = fld(T, cv_folds + 1)
+            seg ≥ 2 || error("Not enough observations for cv_folds=$(cv_folds). Need ≥ 2 per validation slice.")
+        else
+            (0.0 ≤ float(alpha) ≤ 1.0) || error("alpha must be in [0,1].")
+        end
+    end
+    lambda = _validate_lambda!(lambda)
+    return lambda, is_grid, agrid, float(alpha_used)
 end
 
 """
-    _glmnet_path_select(X, y; k, nlambda=100, lambda_min_ratio=1e-3,
-                        lambda=nothing, alpha=0.95, standardize=false,
-                        do_checks=false)
-        -> (best_idx, jstar, βj, status, βmat)
+    _validate_moment_based_inputs!(μ, Σ, T, R, k, epsilon, alpha, lambda, do_checks, cv_folds)
+        -> (lambda, is_grid, agrid::Vector{Float64}, alpha_used::Float64)
 
-Fit GLMNet on `(X, y)` (no intercept), then pick the **largest** λ-path model
-whose support size `s` satisfies `s ≤ k`. Returns:
-- `best_idx::Vector{Int}` — selected indices
-- `jstar::Int`            — column index on the path
-- `βj::AbstractVector`    — coefficients at `jstar` (as a **view**)
-- `status::Symbol`        — `:LASSO_PATH_EXACT_K` or `:LASSO_PATH_ALMOST_K`
-- `βmat::Matrix{Float64}` — dense copy of GLMNet betas (N × L)
+Centralizes argument checks for the moment-based public API when `do_checks=true`.
+Keeps legacy semantics: require k ∈ [1, N].
+"""
+function _validate_moment_based_inputs!(
+    μ::AbstractVector{<:Real},
+    Σ::AbstractMatrix{<:Real},
+    T::Integer,
+    R,
+    k::Integer,
+    epsilon::Real,
+    alpha,
+    lambda,
+    do_checks::Bool,
+    cv_folds::Int
+)
+    N = length(μ)
+    is_grid, agrid = _alpha_mode(alpha)
+    alpha_used = agrid[1]
+
+    if do_checks
+        N > 0 || error("μ must be non-empty.")
+        size(Σ) == (N, N) || error("Σ must be N×N.")
+        (1 ≤ k ≤ N) || error("k must be between 1 and N.")
+        T ≥ 1 || error("T must be a positive integer.")
+        all(isfinite, μ) && all(isfinite, Σ) || error("Non-finite entries in μ or Σ.")
+        isfinite(epsilon) || error("epsilon must be finite.")
+        if is_grid
+            all(0.0 .≤ agrid .≤ 1.0) || error("alpha grid must be within [0,1].")
+            length(agrid) ≥ 2 || error("Provide ≥ 2 alpha values to cross-validate.")
+            R !== nothing || error("alpha grid CV requires raw returns `R`.")
+            # basic feasibility of folds (on R)
+            TR = size(R,1)
+            seg = fld(TR, cv_folds + 1)
+            seg ≥ 2 || error("Not enough observations for cv_folds=$(cv_folds). Need ≥ 2 per validation slice.")
+            size(R, 2) == N || error("R must have N columns (same as length(μ)).")
+            TR ≥ 2 || error("R must have at least 2 rows.")
+            all(isfinite, R) || error("Non-finite entries in R.")
+        else
+            (0.0 ≤ float(alpha) ≤ 1.0) || error("alpha must be in [0,1].")
+        end
+    end
+    lambda = _validate_lambda!(lambda)
+    return lambda, is_grid, agrid, float(alpha_used)
+end
+
+"""
+    _glmnet_path_select(X, y; k, ...) -> (best_idx, jstar, βj, status, βmat)
+
+Fit GLMNet (no intercept). Pick the **largest** (≤k) support on the path.
+Returns a view `βj` on the dense beta matrix to avoid an extra copy.
 """
 function _glmnet_path_select(
     X::AbstractMatrix{<:Real},
@@ -59,16 +177,9 @@ function _glmnet_path_select(
     do_checks && (length(y) == T || error("X and y have incompatible sizes."))
     do_checks && (1 ≤ k ≤ N || error("k must be between 1 and N."))
 
-    # λ policy
-    if lambda !== nothing
-        all(isfinite, lambda) || error("`lambda` contains non-finite values.")
-        all(lambda .> 0)      || error("`lambda` must be strictly positive.")
-        issorted(lambda; rev=true) || error("`lambda` must be non-increasing.")
-        lambda = unique(lambda)
-        !isempty(lambda) || error("`lambda` is empty after removing duplicates.")
-    end
+    lambda = _validate_lambda!(lambda)
 
-    # Hard caps to accelerate: GLMNet halts when df exceeds dfmax
+    # df/pmax caps speed up GLMNet path building
     dfmax = k
     pmax  = max(k + 5, 2k)
 
@@ -88,9 +199,9 @@ function _glmnet_path_select(
 
     @inbounds for j in L:-1:1
         col = @view βmat[:, j]
-        s = count(!iszero, col) # fast count, no alloc
+        s = count(!iszero, col)             # allocation-free count
         if s ≤ k && s > best_len
-            best_idx = findall(!iszero, col)  # allocate only for current winner
+            best_idx = findall(!iszero, col)  # allocate only for the current winner
             best_len = s
             jstar    = j
             s == k && break
@@ -124,14 +235,13 @@ If `normalize_weights=true`, rescale via `Utils.normalize_weights(mode=:relative
     if isempty(sel)
         return w, true
     end
-
     if normalize_weights
         b = βj[sel]
         if all(iszero, b)
             return w, true
         end
-        b_norm = Utils.normalize_weights(b; mode=:relative, tol=tol, do_checks=false)
-        @inbounds w[sel] .= b_norm
+        b = Utils.normalize_weights(b; mode=:relative, tol=tol, do_checks=false)
+        @inbounds w[sel] .= b
     else
         @inbounds w[sel] .= βj[sel]
         if all(iszero, @view w[sel])
@@ -145,27 +255,22 @@ end
 """
     _rolling_folds(T, K; min_val=2) -> Vector{Tuple{UnitRange,UnitRange}}
 
-Time-respecting K-folds: split `1:T` into `K+1` equal-ish blocks; for fold `f`,
-`train = 1:cut[f]`, `valid = (cut[f]+1):cut[f+1]`. Enforces each validation
-slice to have at least `min_val` observations.
+Forward-rolling folds: split 1:T into K+1 blocks; for fold f,
+train = 1:cut[f], valid = (cut[f]+1):cut[f+1]. Each validation has ≥ min_val obs.
 """
 function _rolling_folds(T::Int, K::Int; min_val::Int=2)
     K ≥ 1 || error("cv_folds must be ≥ 1")
     min_val ≥ 1 || error("min_val must be ≥ 1")
-
-    seg = fld(T, K + 1)  # floor(T/(K+1))
-    seg ≥ min_val || error("Not enough observations for the requested cv_folds: T=$(T), folds=$(K), need ≥ $(min_val) per validation fold.")
-
+    seg = fld(T, K + 1)
+    seg ≥ min_val || error("Not enough observations for cv_folds=$(K). Need ≥ $(min_val) per validation slice.")
     cuts = collect(seg:seg:seg*(K+1))
     cuts[end] = T
-
     folds = Tuple{UnitRange{Int},UnitRange{Int}}[]
     for f in 1:K
-        train_end = cuts[f]
-        val_end   = cuts[f+1]
+        train_end = cuts[f]; val_end = cuts[f+1]
         train = 1:train_end
         val   = (train_end+1):val_end
-        length(val) ≥ min_val || error("Validation slice too short (fold=$(f)): got $(length(val)), need ≥ $(min_val).")
+        length(val) ≥ min_val || error("Validation slice too short at fold $(f).")
         push!(folds, (train, val))
     end
     return folds
@@ -175,9 +280,9 @@ end
     _design_from_moments(μ, Σ, T; epsilon, stabilize_Σ)
         -> (X, y, Σs)
 
-Build synthetic design for the moment-only path:
-`Q = T(Σₛ + μμᵀ)`, `U'U = Q`, `X = Uᵀ`, `y = U \\ (Tμ)`.
-Also returns the stabilized `Σs` for downstream SR/weights.
+Moment-only synthetic design:
+Q = T(Σₛ + μμᵀ), U'U = Q, X = Uᵀ, y = U \\ (Tμ).
+Returns stabilized Σₛ for downstream Sharpe/weights use.
 """
 @inline function _design_from_moments(
     μ::AbstractVector{<:Real},
@@ -189,6 +294,7 @@ Also returns the stabilized `Σs` for downstream SR/weights.
     N  = length(μ)
     Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
     Q  = T .* (Matrix(Σs) .+ μ * μ')
+    # tiny bump (relative to diag mean) before chol
     μQ = max(mean(diag(Q)), eps(Float64))
     τ  = eps(Float64) * μQ
     @inbounds for i in 1:N
@@ -200,58 +306,50 @@ Also returns the stabilized `Σs` for downstream SR/weights.
     return X, y, Σs
 end
 
-# Small status helper (unified construction)
 @inline function _mk_status(is_empty::Bool, used_cv::Bool, path_status::Symbol, use_refit::Bool)
     return is_empty ? (use_refit ? path_status : :LASSO_ALLEMPTY) :
            (used_cv  ? :LASSO_ALPHA_CV : path_status)
 end
 
 """
-    _fit_once_for_alpha(R, y; k, alpha, nlambda, lambda_min_ratio, lambda,
-                        standardize, epsilon, stabilize_Σ,
-                        compute_weights, normalize_weights, use_refit, do_checks)
-        -> (selection, weights, status)
+    _finalize_from_selection!(N, selection, mode, μ, Σs, βj, normalize_weights,
+                              compute_weights, epsilon, use_refit, used_cv, path_status)
+        -> (sel, w, sr, status)
 
-Train-time fit on `(R, y)` for a given `alpha`, returning full-length weights
-compatible with the public API semantics.
+One place to finalize outputs from a found support for both entries
+(R-based and moment-based). This keeps refit/vanilla logic in sync.
 """
-function _fit_once_for_alpha(
-    R::AbstractMatrix{<:Real},
-    y::AbstractVector{<:Real};
-    k::Integer,
-    alpha::Real,
-    nlambda::Int, lambda_min_ratio::Real, lambda,
-    standardize::Bool, epsilon::Real, stabilize_Σ::Bool,
-    compute_weights::Bool, normalize_weights::Bool,
-    use_refit::Bool, do_checks::Bool
+function _finalize_from_selection!(
+    N::Int, selection::Vector{Int}, mode::Symbol,
+    μ::AbstractVector{<:Real}, Σs::Symmetric{<:Real,<:AbstractMatrix{<:Real}},
+    βj::AbstractVector{<:Real}, normalize_weights::Bool, compute_weights::Bool,
+    epsilon::Real, use_refit::Bool, used_cv::Bool, path_status::Symbol
 )
-    best_idx, jstar, βj, path_status, _ = _glmnet_path_select(
-        R, y; k, nlambda, lambda_min_ratio, lambda, alpha, standardize, do_checks
-    )
-
-    _, N = size(R)
-    if isempty(best_idx)
-         return (selection=Int[], weights=zeros(Float64, N),
-                 status = use_refit ? path_status : :LASSO_ALLEMPTY)
+    if isempty(selection)
+        status_out = _mk_status(true, used_cv, path_status, use_refit)
+        return (Int[], zeros(Float64, N), 0.0, status_out)
     end
 
-    @views μ  = vec(mean(R; dims=1))
-    @views Σ  = cov(R; corrected=true)
-    Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
-
     if use_refit
-        w = compute_weights ?
-            SharpeRatio.compute_mve_weights(μ, Σs; selection=best_idx,
-                                            normalize_weights=normalize_weights,
-                                            epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
-            zeros(Float64, N)
-        return (selection=sort(best_idx), weights=w, status=path_status)
+        sr = SharpeRatio.compute_mve_sr(μ, Σs; selection=selection,
+                                        epsilon=epsilon, stabilize_Σ=false, do_checks=false)
+        w  = compute_weights ?
+             SharpeRatio.compute_mve_weights(μ, Σs; selection=selection,
+                                             normalize_weights=normalize_weights,
+                                             epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
+             zeros(Float64, N)
+        status_out = _mk_status(false, used_cv, path_status, use_refit)
+        return (sort(selection), w, sr, status_out)
     else
         w = zeros(Float64, N)
-        w, all_empty = _lasso_weights_from_beta!(w, βj, best_idx; normalize_weights=normalize_weights)
-        return (selection=sort(best_idx),
-                weights = all_empty ? zeros(Float64, N) : w,
-                status  = all_empty ? :LASSO_ALLEMPTY : path_status)
+        w, all_empty = _lasso_weights_from_beta!(w, βj, selection; normalize_weights=normalize_weights)
+        status_out = all_empty ? :LASSO_ALLEMPTY : _mk_status(false, used_cv, path_status, use_refit)
+        sr = if all_empty
+            0.0
+        else
+            SharpeRatio.compute_sr(w, μ, Σs; stabilize_Σ=false, do_checks=false)
+        end
+        return (sort(selection), w, sr, status_out)
     end
 end
 
@@ -280,35 +378,9 @@ end
         cv_verbose::Bool = false
     ) -> NamedTuple{(:selection, :weights, :sr, :status, :alpha)}
 
-Path-based **elastic net (LASSO) relaxation** of the mean–variance efficient (MVE)
-support selection: regress target `y` on returns matrix `R` (no intercept),
-fit a GLMNet path, and choose the largest λ-model with support size `≤ k`.
-
-- If `alpha::Real` (default): **no CV**; behavior unchanged vs legacy.
-- If `alpha::Vector`: perform **forward-rolling OOS CV** over the provided `alpha` grid
-  using **validation Sharpe ratio**; pick `α*` that maximizes mean OOS SR, then refit
-  on the full sample with `α*`. Status is tagged `:LASSO_ALPHA_CV`.
-
-Two evaluation modes:
-
-- **Refit (`use_refit=true`)**: compute exact MVE Sharpe (and optional exact weights) **on the selected support**.
-- **Vanilla (`use_refit=false`)**: use raw LASSO coefficients (optionally normalized by `Utils.normalize_weights(mode=:relative)`).
-
-Normalization does **not** affect SR (scale-invariance), but improves numerical stability.
-
-## Arguments (selected)
-- `R`: T×N matrix of excess returns.
-- `k`: maximum support size.
-- `alpha`: scalar (no CV) or vector (grid CV).
-- `cv_folds`: number of forward folds for OOS CV when `alpha` is a grid.
-- `epsilon`, `stabilize_Σ`: ridge + symmetrization for covariance usage.
-
-## Returns
-Named tuple with fields:
-- `selection::Vector{Int}` — indices of selected assets.
-- `weights::Vector{Float64}` — full-length weights (zeros off support).
-- `sr::Float64` — in-sample SR evaluated on full sample.
-- `status::Symbol` — `:LASSO_PATH_EXACT_K`, `:LASSO_PATH_ALMOST_K`, `:LASSO_ALLEMPTY`, or `:LASSO_ALPHA_CV`.
+Elastic-Net relaxation of sparse MVE via GLMNet on (R, y). If `alpha` is a vector,
+performs forward-rolling OOS CV on the grid; otherwise uses the scalar alpha (legacy path).
+Behaviors and statuses are unchanged.
 """
 function mve_lasso_relaxation_search(
     R::AbstractMatrix{<:Real};
@@ -329,66 +401,27 @@ function mve_lasso_relaxation_search(
     cv_verbose::Bool = false
 ) :: NamedTuple{(:selection, :weights, :sr, :status, :alpha)}
     T, N = size(R)
-    is_grid = alpha isa AbstractVector
-    alpha_used = is_grid ? first(unique(Float64.(alpha))) : float(alpha)
+    lambda, is_grid, agrid, alpha_used = _validate_R_based_inputs!(R, k, y, epsilon, alpha, lambda, do_checks, cv_folds)
 
-    # ── checks ────────────────────────────────────────────────────────────────
-    if do_checks
-        T > 1 || error("R must have at least 2 rows.")
-        N > 0 || error("R must have at least 1 column.")
-        (0 ≤ k ≤ N) || error("k must be between 0 and N.")  # allow k=0
-
-        if y !== nothing
-            length(y) == T || error("Length of y must equal number of rows of R.")
-            all(isfinite, y) || error("y contains non-finite values.")
-        end
-
-        if lambda !== nothing
-            all(isfinite, lambda) || error("`lambda` contains non-finite values.")
-            all(lambda .> 0)      || error("`lambda` must be strictly positive.")
-            issorted(lambda; rev=true) || error("`lambda` must be non-increasing.")
-            lambda = unique(lambda)
-            !isempty(lambda) || error("`lambda` is empty after removing duplicates.")
-        end
-
-        isfinite(epsilon) || error("epsilon must be finite.")
-
-        if is_grid
-            agrid = unique(Float64.(alpha))
-            all(isfinite, agrid) || error("alpha grid contains non-finite values.")
-            (all(agrid .≥ 0.0) && all(agrid .≤ 1.0)) || error("alpha grid must be in [0,1].")
-            length(agrid) ≥ 2 || error("Provide ≥ 2 alpha values to cross-validate.")
-        else
-            (0.0 ≤ float(alpha) ≤ 1.0) || error("alpha must be in [0,1].")
-        end
-    end
-
-    # ── trivial fast paths ────────────────────────────────────────────────────
+    # trivial fast paths
     if k == 0
         return (selection=Int[], weights=zeros(Float64, N), sr=0.0, status=:LASSO_ALLEMPTY, alpha=alpha_used)
     elseif k == N
-        @views μ  = vec(mean(R; dims=1))
-        @views Σ  = cov(R; corrected=true)
-        Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
-        sr = SharpeRatio.compute_mve_sr(μ, Σs; stabilize_Σ=false)
-        w  = compute_weights ?
-             SharpeRatio.compute_mve_weights(μ, Σs; normalize_weights=normalize_weights, stabilize_Σ=false) :
-             zeros(Float64, N)
+        μ, Σ = _moments_from_R(R)
+        Σs    = Utils._prep_S(Σ, epsilon, stabilize_Σ)
+        sr    = SharpeRatio.compute_mve_sr(μ, Σs; stabilize_Σ=false)
+        w     = compute_weights ? SharpeRatio.compute_mve_weights(μ, Σs; normalize_weights=normalize_weights, stabilize_Σ=false) : zeros(Float64, N)
         return (selection=collect(1:N), weights=w, sr=sr, status=:LASSO_PATH_EXACT_K, alpha=alpha_used)
     end
 
-    # ── CV over alpha grid (if provided) ──────────────────────────────────────
+    # ── α-grid CV (if requested) on forward-rolling folds
     used_cv = false
     if is_grid
-        agrid = unique(Float64.(alpha))  # validated above if do_checks=true
-        # quick feasibility guard; also enforced by _rolling_folds
         min_val = 2
-        seg = fld(T, cv_folds + 1)
-        seg ≥ min_val || error("Not enough observations for cv_folds=$(cv_folds). Need ≥ $(min_val) per validation fold.")
-
         folds = _rolling_folds(T, cv_folds; min_val=min_val)
+
         best_mean_oos = -Inf
-        best_alpha    = first(agrid)
+        best_alpha    = agrid[1]
         printer = cv_verbose ? println : (_...)->nothing
 
         for αg in agrid
@@ -396,17 +429,30 @@ function mve_lasso_relaxation_search(
             for (tr, va) in folds
                 @views Rtr = R[tr, :]
                 yy = isnothing(y) ? ones(Float64, length(tr)) : @views y[tr]
-                fit = _fit_once_for_alpha(Rtr, yy;
-                    k=k, alpha=αg, nlambda=nlambda, lambda_min_ratio=lambda_min_ratio, lambda=lambda,
-                    standardize=standardize, epsilon=epsilon, stabilize_Σ=stabilize_Σ,
-                    compute_weights=true, normalize_weights=normalize_weights,
-                    use_refit=use_refit, do_checks=false)
 
-                @views Rva = R[va, :]
-                @views μv  = vec(mean(Rva; dims=1))
-                @views Σv  = cov(Rva; corrected=true)
+                best_idx, _, βj, path_status, _ = _glmnet_path_select(
+                    Rtr, yy; k=k, nlambda=nlambda, lambda_min_ratio=lambda_min_ratio,
+                    lambda=lambda, alpha=αg, standardize=standardize, do_checks=false
+                )
+
+                μv, Σv = _moments_from_R(@view R[va, :])
                 Σvs = Utils._prep_S(Σv, epsilon, stabilize_Σ)
-                sr_va = SharpeRatio.compute_sr(fit.weights, μv, Σvs; stabilize_Σ=false, do_checks=false)
+
+                # Build a fold weight vector (refit or vanilla) for OOS SR
+                w = if isempty(best_idx)
+                    zeros(Float64, N)
+                elseif use_refit
+                    μtr, Σtr = _moments_from_R(Rtr)
+                    Σtr_s = Utils._prep_S(Σtr, epsilon, stabilize_Σ)
+                    SharpeRatio.compute_mve_weights(μtr, Σtr_s; selection=best_idx,
+                        normalize_weights=normalize_weights,
+                        epsilon=epsilon, stabilize_Σ=false, do_checks=false)
+                else
+                    ww = zeros(Float64, N)
+                    _lasso_weights_from_beta!(ww, βj, best_idx; normalize_weights=normalize_weights) |> first
+                end
+
+                sr_va = SharpeRatio.compute_sr(w, μv, Σvs; stabilize_Σ=false, do_checks=false)
                 if isfinite(sr_va)
                     ooss += sr_va; cnt += 1
                 end
@@ -418,52 +464,28 @@ function mve_lasso_relaxation_search(
                 best_alpha    = αg
             end
         end
-
-        alpha  = best_alpha
+        alpha_used = float(best_alpha)
         used_cv = true
-        alpha_used = float(alpha)
-    else
-        alpha = float(alpha) # ensure scalar
     end
 
-    # ── main fit on full sample with scalar alpha ─────────────────────────────
+    # ── Final fit on full sample with scalar alpha_used
     yy = isnothing(y) ? ones(Float64, T) : y
-    do_checks && (length(yy) == T || error("Length of y must equal number of rows of R."))
 
-    best_idx, jstar, βj, path_status, _ = _glmnet_path_select(
-        R, yy; k, nlambda, lambda_min_ratio, lambda, alpha=alpha, standardize, do_checks
+    best_idx, _, βj, path_status, _ = _glmnet_path_select(
+        R, yy; k, nlambda, lambda_min_ratio, lambda, alpha=alpha_used, standardize, do_checks
     )
 
-    if isempty(best_idx)
-        status_out = _mk_status(true, used_cv, path_status, use_refit)
-        return (selection=Int[], weights=zeros(Float64, N), sr=0.0, status=status_out, alpha=alpha_used)
-    end
-
-    @views μ  = vec(mean(R; dims=1))
-    @views Σ  = cov(R; corrected=true)
-    Σs = Utils._prep_S(Σ, epsilon, stabilize_Σ)
-
-    if use_refit
-        sr = SharpeRatio.compute_mve_sr(μ, Σs; selection=best_idx,
-                                        epsilon=epsilon, stabilize_Σ=false, do_checks=false)
-        w  = compute_weights ?
-             SharpeRatio.compute_mve_weights(μ, Σs; selection=best_idx,
-                                             normalize_weights=normalize_weights,
-                                             epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
-             zeros(Float64, N)
-        status_out = _mk_status(false, used_cv, path_status, use_refit)
-        return (selection=sort(best_idx), weights=w, sr=sr, status=status_out, alpha=alpha_used)
-    else
-        w = zeros(Float64, N)
-        w, all_empty = _lasso_weights_from_beta!(w, βj, best_idx; normalize_weights=normalize_weights)
-        status_out = all_empty ? :LASSO_ALLEMPTY : _mk_status(false, used_cv, path_status, use_refit)
-        sr = all_empty ? 0.0 : SharpeRatio.compute_sr(w, μ, Σs; stabilize_Σ=false, do_checks=false)
-        return (selection=sort(best_idx), weights=w, sr=sr, status=status_out, alpha=alpha_used)
-    end
+    μ, Σ  = _moments_from_R(R)
+    Σs    = Utils._prep_S(Σ, epsilon, stabilize_Σ)
+    sel, w, sr, status_out = _finalize_from_selection!(
+        N, best_idx, :R, μ, Σs, βj, normalize_weights, compute_weights,
+        epsilon, use_refit, used_cv, path_status
+    )
+    return (selection=sel, weights=w, sr=sr, status=status_out, alpha=alpha_used)
 end
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Public API — Moment-based entrypoint (optionally with returns for CV)
+# Public API — Moment-based entrypoint (optionally with returns for α-CV)
 # ═════════════════════════════════════════════════════════════════════════════
 
 """
@@ -477,7 +499,7 @@ end
         nlambda::Int = 100,
         lambda_min_ratio::Real = 1e-3,
         lambda::Union{Nothing,AbstractVector{<:Real}} = nothing,
-        alpha::Union{Real,AbstractVector{<:Real}} = 0.95,      # scalar → legacy; vector → CV (requires R)
+        alpha::Union{Real,AbstractVector{<:Real}} = 0.95,
         standardize::Bool = false,
         epsilon::Real = Utils.EPS_RIDGE,
         stabilize_Σ::Bool = true,
@@ -489,18 +511,15 @@ end
         cv_verbose::Bool = false
     ) -> NamedTuple{(:selection, :weights, :sr, :status, :alpha)}
 
-Moment-only variant. Constructs a synthetic design from `(μ, Σ, T)`:
-`Q = T(Σₛ + μμᵀ)`, `X = Uᵀ`, `y = U \\ (Tμ)` where `U'U = Q`.
-If `alpha` is a **grid** and `R` is provided, performs **forward-rolling OOS CV** on the
-grid (using OOS SR) to select `α*`, then refits on `(μ, Σ, T)` with `α*`.
-
-If `alpha` is **scalar** (default), behavior matches the legacy moment-only method.
+Moment-only variant via synthetic design X,y from (μ, Σ, T).
+If `alpha` is a grid and `R` is provided, performs forward-rolling OOS CV on α,
+then refits on (μ, Σ, T) at the selected α*. Legacy scalar-α behavior preserved.
 """
 function mve_lasso_relaxation_search(
     μ::AbstractVector{<:Real},
     Σ::AbstractMatrix{<:Real},
     T::Integer;
-    R::Union{Nothing,AbstractMatrix{<:Real}} = nothing,  # OPTIONAL
+    R::Union{Nothing,AbstractMatrix{<:Real}} = nothing,
     k::Integer,
     nlambda::Int = 100,
     lambda_min_ratio::Real = 1e-3,
@@ -516,75 +535,32 @@ function mve_lasso_relaxation_search(
     cv_folds::Int = 5,
     cv_verbose::Bool = false
 ) :: NamedTuple{(:selection, :weights, :sr, :status, :alpha)}
-    N = length(μ)
-    is_grid = alpha isa AbstractVector
-    alpha_used = is_grid ? first(unique(Float64.(alpha))) : float(alpha)
+    N = length(μ) 
+    lambda, is_grid, agrid, alpha_used = _validate_moment_based_inputs!(μ, Σ, T, R, k, epsilon, alpha, lambda, do_checks, cv_folds)
 
-    # ── checks ────────────────────────────────────────────────────────────────
-    if do_checks
-        N > 0 || error("μ must be non-empty.")
-        size(Σ) == (N, N) || error("Σ must be N×N.")
-        (1 ≤ k ≤ N) || error("k must be between 1 and N.")
-        T ≥ 1 || error("T must be a positive integer.")
-        all(isfinite, μ) && all(isfinite, Σ) || error("Non-finite entries in μ or Σ.")
-
-        if lambda !== nothing
-            all(isfinite, lambda) || error("`lambda` contains non-finite values.")
-            all(lambda .> 0)      || error("`lambda` must be strictly positive.")
-            issorted(lambda; rev=true) || error("`lambda` must be non-increasing.")
-            lambda = unique(lambda)
-            !isempty(lambda) || error("`lambda` is empty after removing duplicates.")
-        end
-
-        isfinite(epsilon) || error("epsilon must be finite.")
-
-        if is_grid
-            agrid = unique(Float64.(alpha))
-            all(isfinite, agrid) || error("alpha grid contains non-finite values.")
-            (all(agrid .≥ 0.0) && all(agrid .≤ 1.0)) || error("alpha grid must be in [0,1].")
-            length(agrid) ≥ 2 || error("Provide ≥ 2 alpha values to cross-validate.")
-            R !== nothing || error("alpha grid CV requires raw returns `R` for time-based validation.")
-        else
-            (0.0 ≤ float(alpha) ≤ 1.0) || error("alpha must be in [0,1].")
-        end
-
-        if R !== nothing
-            size(R, 2) == N || error("R must have N columns (same as length(μ)).")
-            size(R, 1) ≥ 2  || error("R must have at least 2 rows.")
-            all(isfinite, R) || error("Non-finite entries in R.")
-        end
-    end
-
-    # ── choose α by CV if grid + R provided ──────────────────────────────────
     used_cv = false
     if is_grid
-        agrid = unique(Float64.(alpha))  # validated above if do_checks=true
         T_R = size(R, 1)
-        min_val = 2
-        seg = fld(T_R, cv_folds + 1)
-        seg ≥ min_val || error("Not enough observations for cv_folds=$(cv_folds). Need ≥ $(min_val) per validation fold.")
-        folds = _rolling_folds(T_R, cv_folds; min_val=min_val)
+        folds = _rolling_folds(T_R, cv_folds; min_val=2)
 
         best_mean_oos = -Inf
-        best_alpha    = first(agrid)
+        best_alpha    = agrid[1]
         printer = cv_verbose ? println : (_...)->nothing
 
         for αg in agrid
             ooss = 0.0; cnt = 0
             for (tr, va) in folds
                 @views Rtr = R[tr, :]
-                @views μtr = vec(mean(Rtr; dims=1))
-                @views Σtr = cov(Rtr; corrected=true)
-                Ttr = length(tr)
+                μtr, Σtr   = _moments_from_R(Rtr)
+                Ttr        = length(tr)
 
-                # moment-only train fit at αg → weights on train support policy
                 Xtr, ytr, Σtr_s = _design_from_moments(μtr, Σtr, Ttr; epsilon=epsilon, stabilize_Σ=stabilize_Σ)
-                best_idx, jstar, βj, path_status, _ = _glmnet_path_select(
+                best_idx, _, βj, path_status, _ = _glmnet_path_select(
                     Xtr, ytr; k=k, nlambda=nlambda, lambda_min_ratio=lambda_min_ratio,
                     lambda=lambda, alpha=αg, standardize=standardize, do_checks=false
                 )
 
-                # build weights for OOS scoring
+                # Build weights for validation SR
                 w = if isempty(best_idx)
                     zeros(Float64, N)
                 elseif use_refit
@@ -596,9 +572,7 @@ function mve_lasso_relaxation_search(
                     _lasso_weights_from_beta!(ww, βj, best_idx; normalize_weights=normalize_weights) |> first
                 end
 
-                @views Rva = R[va, :]
-                @views μva = vec(mean(Rva; dims=1))
-                @views Σva = cov(Rva; corrected=true)
+                μva, Σva = _moments_from_R(@view R[va, :])
                 Σva_s = Utils._prep_S(Σva, epsilon, stabilize_Σ)
                 sr_va = SharpeRatio.compute_sr(w, μva, Σva_s; stabilize_Σ=false, do_checks=false)
                 if isfinite(sr_va)
@@ -613,41 +587,21 @@ function mve_lasso_relaxation_search(
             end
         end
 
-        alpha  = best_alpha
-        used_cv = true
-        alpha_used = float(alpha)
-    else
-        alpha = float(alpha) # ensure scalar
+        alpha_used = float(best_alpha)
+        used_cv    = true
     end
 
-    # ── final fit on the PROVIDED (μ, Σ, T) with scalar alpha ────────────────
+    # Final fit on (μ, Σ, T) with the chosen scalar alpha
     X, y, Σs = _design_from_moments(μ, Σ, T; epsilon=epsilon, stabilize_Σ=stabilize_Σ)
-    best_idx, jstar, βj, path_status, _ = _glmnet_path_select(
-        X, y; k, nlambda, lambda_min_ratio, lambda, alpha=alpha, standardize, do_checks
+    best_idx, _, βj, path_status, _ = _glmnet_path_select(
+        X, y; k, nlambda, lambda_min_ratio, lambda, alpha=alpha_used, standardize, do_checks
     )
 
-    if isempty(best_idx)
-        status_out = _mk_status(true, used_cv, path_status, use_refit)
-        return (selection=Int[], weights=zeros(Float64, N), sr=0.0, status=status_out, alpha=alpha_used)
-    end
-
-    if use_refit
-        sr = SharpeRatio.compute_mve_sr(μ, Σs; selection=best_idx,
-                                        epsilon=epsilon, stabilize_Σ=false, do_checks=false)
-        w  = compute_weights ?
-             SharpeRatio.compute_mve_weights(μ, Σs; selection=best_idx,
-                                             normalize_weights=normalize_weights,
-                                             epsilon=epsilon, stabilize_Σ=false, do_checks=false) :
-             zeros(Float64, N)
-        status_out = _mk_status(false, used_cv, path_status, use_refit)
-        return (selection=sort(best_idx), weights=w, sr=sr, status=status_out, alpha=alpha_used)
-    else
-        w = zeros(Float64, N)
-        w, all_empty = _lasso_weights_from_beta!(w, βj, best_idx; normalize_weights=normalize_weights)
-        status_out = all_empty ? :LASSO_ALLEMPTY : _mk_status(false, used_cv, path_status, use_refit)
-        sr = all_empty ? 0.0 : SharpeRatio.compute_sr(w, μ, Σs; stabilize_Σ=false, do_checks=false)
-        return (selection=sort(best_idx), weights=w, sr=sr, status=status_out, alpha=alpha_used)
-    end
+    sel, w, sr, status_out = _finalize_from_selection!(
+        length(μ), best_idx, :MOM, μ, Σs, βj, normalize_weights, compute_weights,
+        epsilon, use_refit, used_cv, path_status
+    )
+    return (selection=sel, weights=w, sr=sr, status=status_out, alpha=alpha_used)
 end
 
 end # module

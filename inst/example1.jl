@@ -136,8 +136,8 @@ end
 # Experiment A: T=500, N=30, k in 1,3,5,7,9
 # =============================================================================
 Random.seed!(42)
-T, N = 200, 300
-ks = [5, 10, 50, 100] # collect(1:1:15)
+T, N = 20, 30
+ks = [5, 10] # collect(1:1:15)
 methods = ["LASSO-r", "LASSO-r CV", "MIQP-REFIT"]
 cells = Dict{Tuple{Int,String},String}()
 
@@ -152,7 +152,7 @@ R = simulate_returns(T, N)
 
 # Exhaustive guard: skip if too many combinations
 EXH_CAP = 3_000_000
-agrid = collect(0.1:0.1:1)
+agrid = collect(0.15:0.1:0.95)
 
 for k in ks
     # Exhaustive (guarded)
@@ -169,7 +169,7 @@ for k in ks
 
     # LASSO-REFIT
     try
-        _, _, sr, st, α, t = run_lasso_refit(R, μ, Σ, k; alpha=0.6)
+        _, _, sr, st, α, t = run_lasso_refit(R, μ, Σ, k; alpha=0.98)
         label = (st == :LASSO_ALLEMPTY) ? @sprintf("EMPTY / %.2fs", t) : @sprintf("%s | α*=%.2f", cell(sr, t), α)
         cells[(k,"LASSO-r")] = label
         if st == :LASSO_PATH_ALMOST_K

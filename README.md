@@ -1,32 +1,28 @@
 # SparseMaxSR.jl
 
 **SparseMaxSR** is a Julia package for *mean–variance efficient (MVE)* portfolio selection under **cardinality constraints**.  
-It provides unified, numerically robust tools to estimate **sparse maximum‑Sharpe portfolios**, i.e., portfolios composed of at most or exactly *k* assets out of *N*, while preserving the classical mean–variance structure.
+It provides unified, numerically robust tools to estimate **sparse maximum‑Sharpe portfolios**, i.e., portfolios composed of at most or exactly \(k\) assets out of \(N\), while preserving the classical mean–variance structure.
 
 ---
 
 ## 1. Problem statement
 
 We seek to solve the *sparse Sharpe‑maximization problem*:
-
-$$
+\[
 \max_{w \in \mathbb{R}^N}
-\frac{w' \mu}{\sqrt{w' \Sigma w}}
+\frac{w^\top \mu}{\sqrt{w^\top \Sigma\, w}}
 \quad \text{s.t.} \quad \|w\|_0 \le k,
-$$
-
+\]
 where
+- \(\mu \in \mathbb{R}^N\): vector of expected (excess) returns,
+- \(\Sigma \in \mathbb{R}^{N\times N}\): covariance matrix of returns,
+- \(\|w\|_0\): number of nonzeros in \(w\) (sparsity).
 
-- $\mu \in \mathbb{R}^N$: vector of expected excess returns,  
-- $\Sigma \in \mathbb{R}^{N\times N}$: covariance matrix of returns,  
-- $\|w\|_0$: number of nonzero elements in $w$ (sparsity).
-
-The unconstrained MVE (mean–variance efficient) portfolio is
-
-$$
+The unconstrained MVE (mean–variance efficient) solution is
+\[
 w_{\text{MVE}} = \Sigma^{-1}\mu, \qquad
-SR_{\text{MVE}} = \sqrt{\mu'\Sigma^{-1}\mu}.
-$$
+SR_{\text{MVE}} = \sqrt{\mu^\top \Sigma^{-1}\mu}\, .
+\]
 
 SparseMaxSR provides algorithms that approximate this solution when the support size is restricted.
 
@@ -34,129 +30,138 @@ SparseMaxSR provides algorithms that approximate this solution when the support 
 
 ## 2. Methods implemented
 
-SparseMaxSR offers three complementary approaches, all sharing a unified API:
+SparseMaxSR offers three complementary approaches, all sharing a unified API and robust numerics:
 
 | Method | Description | Typical use |
-|:--------|:-------------|:-------------|
-| **Exhaustive / Random Search** | Enumerates or samples subsets of size *k* and selects the one with maximal in‑sample MVE Sharpe ratio. | Small N (≤ 30–40) or validation of heuristics. |
-| **LASSO Relaxation Search** | Solves a continuous relaxation via **Elastic‑Net (GLMNet)** regression; selects the largest support ≤ *k* and optionally refits exact MVE weights. | Large N, fast approximation. |
-| **MIQP Heuristic Search** | Mixed‑integer quadratic heuristic via **JuMP + CPLEX**, with optional cardinality band and progressive bound expansion. | Medium/large N; high accuracy with time control. |
+|:--|:--|:--|
+| **Exhaustive / Random Search** | Enumerates or samples \(k\)-subsets and picks the one with maximal in‑sample **MVE Sharpe**. | Small \(N\) (≤ 30–40) or ground‑truth validation. |
+| **LASSO Relaxation Search** | Continuous relaxation via **Elastic‑Net (GLMNet)**; pick the largest support \(\le k\), optionally **refit** exact MVE on that support; supports fixed \(\alpha\), OOS‑CV over an \(\alpha\)-grid, and **GCV** selection. | Large \(N\), fast approximation / screening. |
+| **MIQP Heuristic Search** | Mixed‑integer quadratic model via **JuMP + CPLEX** with cardinality‑band or exact‑\(k\) and progressive bound expansion; optional **refit**. | Medium/large \(N\); high‑accuracy under time controls. |
 
-All methods call the shared low‑level routines in the [`SharpeRatio`](#sharperatio-module) and [`Utils`](#utils-module) modules for stable covariance handling and Sharpe computation.
+All methods rely on the shared [`SharpeRatio`](#sharperatio-module) and [`Utils`](#utils-module) modules for stable covariance handling and Sharpe computation.
 
 ---
 
 ## 3. Installation
 
-### Option A — local development
-
 ```julia
 julia> using Pkg
 julia> Pkg.activate(".")
-julia> Pkg.develop(path="/path/to/SparseMaxSR")
+julia> Pkg.instantiate()
 julia> using SparseMaxSR
 ```
 
-### Option B — clone from Git
-
-```julia
-julia> using Pkg
-julia> Pkg.add(url="https://github.com/<org>/SparseMaxSR.jl")
-julia> using SparseMaxSR
-```
-
-> Add solver backends (`CPLEX`, `HiGHS`, `MosekTools`, `SCS`, etc.) to your environment as required.
+> Add solver backends you plan to use (e.g., `CPLEX`) to your environment.
 
 ---
 
-## 4. Dependencies
+## 4. Exported API (overview)
 
-| Dependency | Purpose |
-|:------------|:---------|
-| `LinearAlgebra`, `Statistics`, `Random` | Core numerical routines |
-| `Combinatorics` | Exhaustive and random subset generation |
-| `GLMNet` | LASSO / Elastic‑Net path solver |
-| `JuMP`, `MathOptInterface`, `CPLEX` | MIQP heuristic search |
-
----
-
-## 5. Exported API
-
-All main routines return **named tuples** `(selection, weights, sr, status)` or `(selection, sr)` depending on context.
+All main routines return either a **named tuple** `(selection, weights, sr, status)` (MIQP/LASSO) or a pair `(selection, sr)` (Exhaustive), as detailed below.
 
 | Field | Meaning |
-|:------|:---------|
-| `selection` | Vector of indices of selected assets |
-| `weights` | Portfolio weights (zeros off‑support) |
-| `sr` | In‑sample Sharpe ratio |
-| `status` | Symbol describing solver outcome (`:OK`, `:LASSO_PATH_EXACT_K`, etc.) |
+|:--|:--|
+| `selection` | Sorted indices of selected assets |
+| `weights` | Full‑length weight vector (zeros off‑support; present when `compute_weights=true` or by design) |
+| `sr` | In‑sample Sharpe ratio of the returned portfolio or of the MVE refit |
+| `status` | Symbol describing the outcome (e.g., `:OK`, `:LASSO_PATH_EXACT_K`, MOI termination status, etc.) |
 
 ---
 
-### 🔹 SharpeRatio module
+## 5. Module & Function Reference
+
+Below, each function uses a uniform structure:
+**Name**, **Description** (with formulas / pseudo‑algorithm), **Arguments**, **Returns**.
+
+### SharpeRatio module
 
 #### `compute_sr`
 
+**Description.** Sharpe ratio of a given portfolio \(w\):
+\[
+SR(w) = \frac{w^\top \mu}{\sqrt{w^\top \Sigma_s\, w}}, \qquad 
+\Sigma_s := \text{Sym}\Big(\tfrac{\Sigma + \Sigma^\top}{2} + \epsilon\,\bar d\, I\Big),
+\]
+where \(\bar d = \tfrac{1}{N}\operatorname{tr}(\Sigma)\) and the stabilizing ridge is controlled by `epsilon` (if `stabilize_Σ=true`). Optional `selection` restricts both numerator and denominator to a subset.
+
+**Signature.**
 ```julia
 compute_sr(w::AbstractVector, μ::AbstractVector, Σ::AbstractMatrix;
            selection::AbstractVector{<:Integer}=Int[],
-           epsilon::Real=EPS_RIDGE,
+           epsilon::Real=Utils.EPS_RIDGE,
            stabilize_Σ::Bool=true,
            do_checks::Bool=false) -> Float64
 ```
 
-Computes the Sharpe ratio of a given portfolio:
+**Arguments.**
+- `w`, `μ`, `Σ`: portfolio weights, mean vector, covariance matrix.
+- `selection`: subset indices; if empty, use full universe.
+- `epsilon`: ridge size for stabilization.
+- `stabilize_Σ`: whether to symmetrize and ridge‑stabilize `Σ` internally.
+- `do_checks`: validate shapes/finiteness.
 
-$$
-SR(w) = \frac{w' \mu}{\sqrt{w' (\Sigma + \epsilon I) w}}.
-$$
-
-If `selection` is provided, only those indices contribute to the numerator and denominator.  
-Returns `NaN` when variance ≤ 0 or not finite.
+**Returns.** `Float64` Sharpe; returns `NaN` if variance ≤ 0 or not finite.
 
 ---
 
 #### `compute_mve_sr`
 
+**Description.** Maximum Sharpe (MVE) on a given subset \(S\):
+\[
+SR^\star(S) = \sqrt{\mu_S^\top \Sigma_S^{-1}\mu_S}\, .
+\]
+Internally uses the stabilized/symmetrized covariance \(\Sigma_s\) once per call.
+
+**Signature.**
 ```julia
 compute_mve_sr(μ::AbstractVector, Σ::AbstractMatrix;
                selection::AbstractVector{<:Integer}=Int[],
-               epsilon::Real=EPS_RIDGE,
+               epsilon::Real=Utils.EPS_RIDGE,
                stabilize_Σ::Bool=true,
                do_checks::Bool=false) -> Float64
 ```
 
-Computes the **maximum Sharpe ratio** of the mean–variance efficient (MVE) portfolio on a given subset:
+**Arguments.** As above; `selection` restricts the universe to \(S\).
 
-$$
-SR^*(S) = \sqrt{ \mu_S' \Sigma_S^{-1} \mu_S }.
-$$
-
-When `selection` is empty, the full‑universe MVE Sharpe ratio is returned.
+**Returns.** `Float64` \(SR^\star\).
 
 ---
 
 #### `compute_mve_weights`
 
+**Description.** MVE weights \(w=\Sigma^{-1}\mu\) (restricted to `selection` if provided). Optional normalization rescales the vector for numerical safety; this does **not** change Sharpe ratios (scale‑invariant).
+
+**Signature.**
 ```julia
 compute_mve_weights(μ::AbstractVector, Σ::AbstractMatrix;
                     selection::AbstractVector{<:Integer}=Int[],
                     normalize_weights::Bool=false,
-                    epsilon::Real=EPS_RIDGE,
+                    epsilon::Real=Utils.EPS_RIDGE,
                     stabilize_Σ::Bool=true,
                     do_checks::Bool=false) -> Vector{Float64}
 ```
 
-Computes MVE weights $w = \Sigma^{-1}\mu$ (restricted to the chosen support if provided).  
-If `normalize_weights=true`, weights are rescaled for numerical stability.  
-Normalization does **not** affect Sharpe ratios (scale‑invariant).
+**Arguments.** As above; set `normalize_weights=true` to apply `Utils.normalize_weights` (relative‑L1 safeguard).
+
+**Returns.** `Vector{Float64}` full‑length weights (zeros off‑support if `selection` provided).
 
 ---
 
-### 🔹 ExhaustiveSearch module
+### ExhaustiveSearch module
 
 #### `mve_exhaustive_search`
 
+**Description.** Best‑subset search for MVE Sharpe at fixed cardinality \(k\).  
+Two modes:
+1) **Enumeration** of all \(\binom{N}{k}\) supports;  
+2) **Sampling** of `max_samples` supports (without replacement within a support), optionally deduplicated.
+
+Scoring uses a single stabilized covariance \(\Sigma_s\) and
+\[
+SR^\star(S) = \sqrt{\mu_S^\top \Sigma_{s,S}^{-1}\mu_S}.
+\]
+
+**Signature.**
 ```julia
 mve_exhaustive_search(μ::AbstractVector{<:Real},
                       Σ::AbstractMatrix{<:Real};
@@ -164,187 +169,268 @@ mve_exhaustive_search(μ::AbstractVector{<:Real},
                       epsilon::Real = Utils.EPS_RIDGE,
                       stabilize_Σ::Bool = true,
                       do_checks::Bool = false,
-                      # enumeration / sampling knobs
                       enumerate_all::Bool = true,
                       max_samples::Int = 0,
                       dedup_samples::Bool = true,
-                      rng::AbstractRNG = Random.GLOBAL_RNG,
-                      # outputs
-                      compute_weights::Bool = true
-) -> NamedTuple{(:selection, :weights, :sr, :status)}
+                      rng::AbstractRNG = Random.GLOBAL_RNG
+) :: Tuple{Vector{Int}, Float64}
 ```
 
-Enumerates or samples subsets of size `k`, returning the best subset and its MVE Sharpe ratio.  
-For feasible $\binom{N}{k}$, set `enumerate_all=true`; otherwise, provide `max_samples`.
+**Arguments.**
+- `μ`, `Σ`: asset moments.
+- `k`: subset size (1 ≤ k ≤ N).
+- `enumerate_all`: `true` → enumerate; `false` → sample.
+- `max_samples`: number of sampled supports if `enumerate_all=false`.
+- `dedup_samples`: ensure distinct supports when sampling.
+- `rng`: RNG for sampling.
+- `epsilon`, `stabilize_Σ`, `do_checks`: numerical/validation options.
 
-| Argument | Description |
-|:----------|:-------------|
-| `μ`, `Σ` | Mean and covariance |
-| `k` | Target subset size |
-| `enumerate_all` | Enumerate all combinations (`true`) or sample |
-| `max_samples` | Number of samples if not enumerating |
-| `dedup_samples` | Ensure sampled supports are unique |
-| `rng` | Random number generator |
-| `epsilon`, `stabilize_Σ`, `do_checks` | Numerical options |
-| `compute_weights` | Output optimal weights |
+**Returns.**
+- `(selection::Vector{Int}, sr::Float64)` — best support and its in‑sample MVE Sharpe.
 
-Returns `(selection, sr)`.
+> For grid evaluations across many `k`, see `mve_exhaustive_search_gridk`.
 
 ---
 
-### LassoRelaxationSearch
+### LassoRelaxationSearch module
 
-The `LassoRelaxationSearch` module implements **LASSO and Elastic‑Net relaxations** of the sparse maximum‑Sharpe portfolio problem.  
-It provides two main entry points:
+The LASSO/Elastic‑Net relaxation is built on a regression path (no intercept) and a **support‑size rule**: choose the column on the path whose support size is the **largest ≤ k** (closest from below). Two entry points exist.
 
----
+Mathematically, the GLMNet path solves, for a given \((\alpha,\lambda)\),
+\[
+\min_{\beta \in \mathbb{R}^N} \;
+\frac{1}{2T}\,\lVert y - X\beta \rVert_2^2
+\;+\;
+\lambda\!\left(\frac{1-\alpha}{2}\lVert\beta\rVert_2^2 + \alpha \lVert\beta\rVert_1\right),
+\qquad \alpha \in [0,1].
+\]
+Selection is by the **largest support ≤ k** along the path, then either:
+- **Refit** exact MVE on that support (recommended), or
+- Return the **vanilla** LASSO portfolio built from the coefficients (optionally normalized).
 
-#### `mve_lasso_relaxation_search(R::AbstractMatrix; k::Int, α::Union{Float64,Vector{Float64}}=1.0, use_refit::Bool=false, ...)`
+Both entry points support three ways to specify \(\alpha\):
+- `alpha_select = :fixed` (default): scalar \(\alpha\). If `alpha` is a vector and `:fixed`, an **OOS cross‑validation** over the grid is performed (forward‑rolling folds).
+- `alpha_select = :oos_cv`: explicit OOS‑CV over an `alpha`‑grid (requires `R` in the moment‑based API).
+- `alpha_select = :gcv`: **generalized cross‑validation** over an `alpha`‑grid (no folds). For each \(\alpha\), pick \(\lambda\) by the strict target‑\(k\) rule; compute log‑GCV using a **ridge‑only degrees of freedom** on the selected set:
+  \[
+  \mathrm{df}(\alpha,\lambda;A) \;=\; \operatorname{tr}\!\left( S_A \, (S_A + \lambda_2 I)^{-1} \right),\quad
+  S_A = X_A^\top X_A,\ \lambda_2 = \lambda(1-\alpha).
+  \]
+  The log‑GCV criterion is
+  \[
+  \log\mathrm{GCV} = \log(\mathrm{RSS}) - 2\log\!\Big(1-\tfrac{\mathrm{df}}{\kappa T}\Big) - \log T,
+  \]
+  with stability parameter \(\kappa\) (argument `gcv_kappa`). The \(\alpha\) with the **smallest** log‑GCV is selected. If no \(\lambda\) attains \(|A|\le k\) for any \(\alpha\), the function returns zeros with status `:LASSO_GCV_INFEASIBLE`.
 
-Perform sparse mean‑variance efficient (MVE) portfolio selection via a **LASSO/Elastic‑Net relaxation** using the *returns matrix* \( R \in \mathbb{R}^{T \times N} \).
+#### `mve_lasso_relaxation_search` — R‑based
 
-##### Arguments
+**Description.** Builds the path directly on raw returns \(R\) and optional response \(y\) (default: a vector of ones). Supports fixed \(\alpha\), OOS‑CV on an \(\alpha\)-grid, or GCV over an \(\alpha\)-grid. Final output is either **refit** MVE on the selected support or **vanilla** LASSO weights from the chosen column.
 
-- `R::Matrix{Float64}` — matrix of excess returns (rows = time, columns = assets).  
-- `k::Int` — target support size.  
-- `α::Union{Float64,Vector{Float64}}=1.0` — Elastic‑Net mixing parameter(s):  
-  - `α=1.0` → pure LASSO;  
-  - `α<1.0` → Elastic‑Net penalty.  
-  - If a **vector** of α values is passed, *cross‑validation* is performed automatically.  
-- `use_refit::Bool=false` — if `true`, the final weights are recomputed by refitting the exact MVE solution on the selected support.  
-- `nlambda::Int=100` — number of λ values used internally by GLMNet.  
-- `lambda_min_ratio::Float64=1e-3` — ratio λₘᵢₙ / λₘₐₓ.  
-- `standardize::Bool=false` — whether to standardize predictors (columns of `R`).  
-- `normalize_weights::Bool=false` — whether to normalize the final weights to sum to one.  
-- `weights_sum1::Bool=false` — if `true`, enforces \(\sum_i w_i = 1\) in the refit step.  
-- `epsilon::Float64` — ridge‑style regularization constant for numerical stability.  
-- `stabilize_Σ::Bool` — whether to stabilize the sample covariance before inversion.  
-- `do_checks::Bool=false` — perform argument and dimension checks.  
-- `cv_folds::Int=5` — number of folds for α‑grid cross‑validation (if α is a vector).  
-- `cv_verbose::Bool=false` — print cross‑validation progress.
-
-##### Returns
-
-A named tuple with fields:
-
+**Signature.**
 ```julia
-(selection = Vector{Int},
- weights    = Vector{Float64},
- sr         = Float64,
- status     = Symbol,
- alpha      = Float64)
+mve_lasso_relaxation_search(R::AbstractMatrix{<:Real};
+    k::Integer,
+    y::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    nlambda::Int = 100,
+    lambda_min_ratio::Real = 1e-3,
+    lambda::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    alpha::Union{Real,AbstractVector{<:Real}} = 0.95,
+    standardize::Bool = false,
+    epsilon::Real = Utils.EPS_RIDGE,
+    stabilize_Σ::Bool = true,
+    compute_weights::Bool = false,
+    normalize_weights::Bool = false,
+    use_refit::Bool = true,
+    do_checks::Bool = false,
+    cv_folds::Int = 5,
+    cv_verbose::Bool = false,
+    alpha_select::Symbol = :fixed,   # :fixed | :oos_cv | :gcv
+    gcv_kappa::Real = 1.0
+) :: NamedTuple{(:selection, :weights, :sr, :status, :alpha)}
 ```
 
-where  
-- `selection` is the index set of chosen assets,  
-- `weights` are the corresponding portfolio weights,  
-- `sr` is the in‑sample Sharpe ratio,  
-- `status` is one of:
-  - `:OK` — valid selection and Sharpe ratio;
-  - `:LASSO_PATH_ALMOST_K` — best model had fewer than `k` active coefficients;
-  - `:LASSO_ALLEMPTY` — all coefficients were zero;
-- `alpha` is the chosen α (either the input value or the CV‑selected optimum).
+**Arguments.**
+- `R` (`T×N`): raw returns matrix; `y` (`T`): optional response (defaults to ones).
+- `k`: target support size.
+- `alpha`: scalar (fixed) or vector grid; `alpha_select`: `:fixed`, `:oos_cv`, or `:gcv`.
+- `lambda`, `nlambda`, `lambda_min_ratio`: path controls (passed to GLMNet).
+- `standardize`: pass `true` to GLMNet standardization if desired.
+- `epsilon`, `stabilize_Σ`: stabilization used when refitting or scoring.
+- `compute_weights`: if `true`, return full‑length weights (zeros off‑support).
+- `normalize_weights`: normalize vanilla weights (or refit weights) for numerical stability.
+- `use_refit`: if `true`, refit exact MVE on the selected support; else return vanilla LASSO portfolio.
+- `cv_folds`, `cv_verbose`: OOS‑CV controls (forward‑rolling folds) for `:fixed` with vector `alpha` and for `:oos_cv` mode.
+- `gcv_kappa`: \(\kappa\) in the log‑GCV formula.
+- `do_checks`: validate inputs and basic feasibility.
+
+**Returns.**
+- `selection::Vector{Int}` — chosen support (largest \(\le k\)).
+- `weights::Vector{Float64}` — refit MVE weights (if `use_refit && compute_weights`) or vanilla LASSO weights; zeros if empty support.
+- `sr::Float64` — Sharpe of refit MVE (refit) or vanilla portfolio (vanilla).
+- `status::Symbol` — e.g., `:LASSO_PATH_EXACT_K`, `:LASSO_PATH_ALMOST_K`, `:LASSO_ALLEMPTY`, `:LASSO_ALPHA_CV`, `:LASSO_ALPHA_GCV`, `:LASSO_GCV_INFEASIBLE`.
+- `alpha::Float64` — final \(\alpha\) used.
 
 ---
 
-#### `mve_lasso_relaxation_search(μ::Vector, Σ::Matrix, T::Int; R::Union{Nothing,Matrix}=nothing, α::Union{Float64,Vector{Float64}}=1.0, ...)`
+#### `mve_lasso_relaxation_search` — moment‑based
 
-Moment‑based entry point (using **estimated moments** instead of raw returns).  
-This function provides identical functionality but allows passing sample moments directly.
+**Description.** Constructs a **synthetic design** \((X,y)\) from \((\mu,\Sigma,T)\) and proceeds as above. Optionally provide `R` to enable OOS‑CV over an \(\alpha\)-grid.  
+Synthetic design (with stabilized \(\Sigma_s\)) is:
+\[
+Q = T(\Sigma_s + \mu\mu^\top), \quad U^\top U = Q,\quad X = U^\top,\quad y = U \backslash (T\mu).
+\]
 
-##### Arguments
+**Signature.**
+```julia
+mve_lasso_relaxation_search(μ::AbstractVector{<:Real},
+                            Σ::AbstractMatrix{<:Real},
+                            T::Integer;
+    R::Union{Nothing,AbstractMatrix{<:Real}} = nothing,   # enables OOS α‑CV
+    k::Integer,
+    nlambda::Int = 100,
+    lambda_min_ratio::Real = 1e-3,
+    lambda::Union{Nothing,AbstractVector{<:Real}} = nothing,
+    alpha::Union{Real,AbstractVector{<:Real}} = 0.95,
+    standardize::Bool = false,
+    epsilon::Real = Utils.EPS_RIDGE,
+    stabilize_Σ::Bool = true,
+    compute_weights::Bool = false,
+    normalize_weights::Bool = false,
+    use_refit::Bool = true,
+    do_checks::Bool = false,
+    cv_folds::Int = 5,
+    cv_verbose::Bool = false,
+    alpha_select::Symbol = :fixed,   # :fixed | :oos_cv | :gcv
+    gcv_kappa::Real = 1.0
+) :: NamedTuple{(:selection, :weights, :sr, :status, :alpha)}
+```
 
-- `μ::Vector{Float64}` — mean vector of returns.  
-- `Σ::Matrix{Float64}` — covariance matrix of returns.  
-- `T::Int` — effective sample size.  
-- `R::Union{Nothing,Matrix}=nothing` — optional returns matrix.  
-  If provided, α‑grid CV is performed across the values in `α`.  
-- All remaining keyword arguments are identical to the previous method.
+**Arguments.**
+- `μ`, `Σ`, `T`: moments and (effective) sample size for the synthetic design.
+- `R` (optional): raw returns to enable OOS α‑CV (`:fixed` with vector `alpha`, or `:oos_cv` mode).
+- Remaining arguments/semantics as in the R‑based entry point.
 
-##### Returns
-
-Same named tuple as above.
+**Returns.** As in the R‑based entry point (including the `alpha` used).
 
 ---
 
-##### Notes
-
-- When multiple α values are provided, `mve_lasso_relaxation_search` internally performs **cross‑validation** on `R` to select the α yielding the highest out‑of‑sample Sharpe ratio, and reports that α in the output field `alpha`.  
-- Setting `use_refit=true` recomputes the exact MVE weights restricted to the selected support, using `compute_mve_weights` internally.  
-- The LASSO and refit procedures can be used for grid experiments over both support size `k` and α to approximate the sparse maximum‑Sharpe frontier efficiently.
-
----
-
-### 🔹 MIQPHeuristicSearch module
+### MIQPHeuristicSearch module
 
 #### `mve_miqp_heuristic_search`
 
+**Description.** Heuristic MIQP for sparse MVE **selection** with box bounds and a cardinality **band** or **exact‑k**. The core model (with stabilized/symmetrized \(\Sigma_s\)) is:
+\[
+\begin{aligned}
+\min_{x,v}\quad & \tfrac{1}{2}\,\gamma\, x^\top \Sigma_s x - \mu^\top x \\
+\text{s.t.}\quad
+& m \le \sum_i v_i \le k \quad (\text{or } \sum_i v_i = k \text{ if exact}) ,\\
+& v_i = 0 \Rightarrow x_i = 0,\qquad
+  v_i = 1 \Rightarrow f_{\min,i} \le x_i \le f_{\max,i},\\
+& v_i \in \{0,1\}. 
+\end{aligned}
+\]
+If `normalize_weights=true`, the budget \(\sum_i x_i = 1\) is **added** and outputs are normalized accordingly.  
+A progressive **bound‑expansion** loop (up to `expand_rounds`) relaxes tight bounds and re‑solves.
+
+**Pseudo‑algorithm (high‑level).**
+1. Build \(\Sigma_s\) once; set band \(m\le\sum v_i\le k\) (or exact‑\(k\)).
+2. Solve MIQP with indicator/big‑M linking and caps \([f_{\min},f_{\max}]\).
+3. If some chosen \(x_i\) is near a bound, expand that bound and re‑solve (repeat up to `expand_rounds`).
+4. Extract support \(S=\{i: v_i=1\}\).  
+   - **Refit**: compute \(SR^\star(S)\) and (optionally) \(w_{\text{MVE}}(S)\).  
+   - **Vanilla**: keep the MIQP weights \(x\) (optionally normalized).
+
+**Signature.**
 ```julia
 mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
-                          k::Integer,
-                          exactly_k::Bool=false,
-                          m::Union{Int,Nothing}=nothing,
-                          γ::Float64=1.0,
-                          fmin::AbstractVector=zeros(length(μ)),
-                          fmax::AbstractVector=ones(length(μ)),
-                          expand_rounds::Int=20,
-                          expand_factor::Float64=3.0,
-                          expand_tol::Float64=1e-2,
-                          mipgap::Float64=1e-4,
-                          time_limit::Real=200,
-                          threads::Int=0,
-                          compute_weights::Bool=false,
-                          normalize_weights::Bool=false,
-                          use_refit::Bool=true,
-                          verbose::Bool=false,
-                          epsilon::Real=EPS_RIDGE,
-                          stabilize_Σ::Bool=true,
-                          do_checks::Bool=false)
+    k::Integer,
+    exactly_k::Bool=false,
+    m::Union{Int,Nothing}=nothing,           # default: max(0, k-1)
+    γ::Float64=1.0,
+    fmin::AbstractVector=zeros(length(μ)),
+    fmax::AbstractVector=ones(length(μ)),
+    expand_rounds::Int=20,
+    expand_factor::Float64=3.0,
+    expand_tol::Float64=1e-2,
+    mipgap::Float64=1e-4,
+    time_limit::Real=200,
+    threads::Int=0,
+    x_start::Union{Nothing,AbstractVector}=nothing,
+    v_start::Union{Nothing,AbstractVector}=nothing,
+    compute_weights::Bool=false,
+    normalize_weights::Bool=false,   # also toggles budget ∑x=1
+    use_refit::Bool=true,
+    epsilon::Real=Utils.EPS_RIDGE,
+    stabilize_Σ::Bool=true,
+    verbose::Bool=false,
+    do_checks::Bool=false
+) :: NamedTuple{(:selection, :weights, :sr, :status)}
 ```
 
-Heuristic mixed‑integer quadratic programming (MIQP) solver for sparse MVE selection.  
-The optimization problem is:
+**Arguments.**
+- `μ`, `Σ`, `k`: asset moments and target cardinality (`k` is an upper bound unless `exactly_k=true`).
+- `exactly_k`, `m`: exact‑\(k\) or band (default `m=max(0,k-1)`).
+- `γ`: risk‑aversion scale (just rescales the quadratic term).
+- `fmin`, `fmax`: lower/upper caps active when an asset is selected.
+- `expand_rounds`, `expand_factor`, `expand_tol`: bound‑expansion controls.
+- `mipgap`, `time_limit`, `threads`, `x_start`, `v_start`: MIP controls and warm starts.
+- `compute_weights`: if `true`, return weights (refit or vanilla as per `use_refit`).
+- `normalize_weights`: adds \(\sum x = 1\) inside MIQP and normalizes outputs (or refit weights).
+- `use_refit`: if `true`, compute exact MVE Sharpe/weights on the final support; else keep MIQP portfolio `x`.
+- `epsilon`, `stabilize_Σ`, `verbose`, `do_checks`: numerics and I/O.
 
-$$
-\begin{aligned}
-\min_{x,v} \; & \tfrac{1}{2} \gamma x' \Sigma_s x - \mu'x \\
-\text{s.t.} \;& m \le \sum_i v_i \le k, \\
-& v_i=0 \Rightarrow x_i=0, \\
-& v_i=1 \Rightarrow f_{\min,i} \le x_i \le f_{\max,i}.
-\end{aligned}
-$$
-
-If `normalize_weights=true`, adds a budget constraint $\sum_i x_i = 1$ and rescales outputs.
-
-Key options:
-- `expand_rounds`, `expand_factor`, `expand_tol`: progressive bound‑expansion heuristic  
-- `mipgap`, `time_limit`: CPLEX tolerances  
-- `use_refit`: recompute exact MVE SR/weights on final support  
-- `normalize_weights`: toggles ∑x = 1 and post‑normalization
-
-Returns `(selection, weights, sr, status)`.
+**Returns.**
+- `selection::Vector{Int}` — indices with \(v_i=1\).
+- `weights::Vector{Float64}` — refit MVE weights (if `use_refit && compute_weights`) or the raw MIQP `x` (if `!use_refit && compute_weights`); zeros otherwise.
+- `sr::Float64` — refit MVE Sharpe on \(S\) (refit) or Sharpe of `x` (vanilla).
+- `status` — MOI termination status from the final solve.
 
 ---
 
-## 6. Example usage
+### Utils module
 
-The included [`example.jl`](example.jl) script compares all methods on simulated two‑factor returns:
+#### `normalize_weights`
+
+**Description.** Stable post‑scaling of a weight vector.  
+Modes:
+- `:absolute` — divide by \(\max(|\sum w|,\ \text{tol},\ 1\!e\!-\!10)\).
+- `:relative` (default) — divide by \(\max(|\sum w|,\ \text{tol}\,\lVert w\rVert_1,\ 1\!e\!-\!10)\).
+
+If both \(\sum w\) and \(\lVert w\rVert_1\) are tiny, returns the zero vector.
+
+**Signature.**
+```julia
+normalize_weights(w::AbstractVector;
+                  mode::Symbol=:relative,
+                  tol::Real=1e-6,
+                  do_checks::Bool=false) -> Vector{Float64}
+```
+
+**Arguments.** `mode` ∈ `(:absolute, :relative)`, `tol` > 0; `do_checks` validates inputs.  
+**Returns.** Rescaled copy of `w`.
+
+---
+
+## 6. Example
+
+Run the bundled script comparing EXHAUSTIVE, LASSO (vanilla/refit), and MIQP (vanilla/refit) across several regimes:
 
 ```bash
 julia --project=. example.jl
 ```
 
-Example output:
-
-```
-Results — Experiment A (T=500, N=30)
-------------------------------------
-k      | EXHAUSTIVE         | LASSO‑VANILLA      | LASSO‑REFIT        | MIQP‑VANILLA       | MIQP‑REFIT
------------------------------------------------------------------------------------------------------
-1      | 0.1538 / 0.00s     | 0.1538 / 0.00s     | 0.1538 / 0.00s     | 0.1538 / 4.7s      | 0.1538 / 0.2s
-3      | 0.1962 / 0.07s     | 0.1760 / 0.00s     | 0.1945 / 0.00s     | 0.1930 / 3.1s      | 0.1955 / 0.6s
-...
-```
+The script prints compact tables of \(SR\) and timing for each method and \(k\).
 
 ---
 
+## 7. Reproducibility & numerics
+
+- All routines symmetrize and (optionally) ridge‑stabilize \(\Sigma\) via a single helper and re‑use the stabilized matrix across inner loops.  
+- Sharpe ratios use the same stabilized \(\Sigma_s\) consistently.  
+- Randomized components (sampling, CV splits) accept an explicit RNG or use deterministic seeds across grids when appropriate.
+
+---
+
+## 8. License
+
+MIT. See `LICENSE`.

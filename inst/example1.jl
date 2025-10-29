@@ -160,7 +160,7 @@ end
 # Experiment A (small & fast): T=120, N=30, k in {5, 10}
 # =============================================================================
 Random.seed!(42)
-T, N = 120, 30
+T, N = 120, 300
 ks = [5, 10]
 methods = ["LASSO-r (α fixed)", "LASSO-r (α OOS‑CV)", "LASSO-r (α GCV)", "MIQP‑REFIT"]
 cells = Dict{Tuple{Int,String},String}()
@@ -179,7 +179,7 @@ agrid = collect(0.15:0.10:0.95)
 for k in ks
     # LASSO-REFIT (α fixed)
     try
-        _, _, sr, st, α, t = run_lasso_refit_fixed(R, μ, Σ, k; alpha=0.90)
+        _, _, sr, st, α, t = run_lasso_refit_fixed(R, μ, Σ, k; alpha=0.4)
         label = (st == :LASSO_ALLEMPTY) ? @sprintf("EMPTY / %.2fs", t) : @sprintf("%s | α=%.2f", cell(sr, t), α)
         cells[(k,"LASSO-r (α fixed)")] = label
         if st == :LASSO_PATH_ALMOST_K

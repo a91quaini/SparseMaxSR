@@ -7,22 +7,27 @@ It provides unified, numerically robust tools to estimate **sparse maximum‑Sha
 
 ## 1. Problem statement
 
-We seek to solve the *sparse Sharpe‑maximization problem*:
-\[
-\max_{w \in \mathbb{R}^N}
+We seek to solve the *sparse Sharpe-maximization problem*:
+
+$$
+\max_{w \in \mathbb{R}^N}\;
 \frac{w^\top \mu}{\sqrt{w^\top \Sigma\, w}}
-\quad \text{s.t.} \quad \|w\|_0 \le k,
-\]
+\quad \text{s.t.} \quad \lVert w \rVert_0 \le k,
+$$
+
 where
-- \(\mu \in \mathbb{R}^N\): vector of expected (excess) returns,
-- \(\Sigma \in \mathbb{R}^{N\times N}\): covariance matrix of returns,
-- \(\|w\|_0\): number of nonzeros in \(w\) (sparsity).
+
+- \(\mu \in \mathbb{R}^N\): vector of expected (excess) returns,  
+- \(\Sigma \in \mathbb{R}^{N\times N}\): covariance matrix of returns,  
+- \(\lVert w \rVert_0\): number of nonzeros in \(w\) (sparsity).
 
 The unconstrained MVE (mean–variance efficient) solution is
-\[
-w_{\text{MVE}} = \Sigma^{-1}\mu, \qquad
+
+$$
+w_{\text{MVE}} = \Sigma^{-1}\mu, 
+\qquad
 SR_{\text{MVE}} = \sqrt{\mu^\top \Sigma^{-1}\mu}\, .
-\]
+$$
 
 SparseMaxSR provides algorithms that approximate this solution when the support size is restricted.
 
@@ -34,9 +39,9 @@ SparseMaxSR offers three complementary approaches, all sharing a unified API and
 
 | Method | Description | Typical use |
 |:--|:--|:--|
-| **Exhaustive / Random Search** | Enumerates or samples \(k\)-subsets and picks the one with maximal in‑sample **MVE Sharpe**. | Small \(N\) (≤ 30–40) or ground‑truth validation. |
+| **Exhaustive / Random Search** | Enumerates or samples \(k\)-subsets and picks the one with maximal in-sample **MVE Sharpe**. | Small \(N\) (≤ 30–40) or ground-truth validation. |
 | **LASSO Relaxation Search** | Continuous relaxation via **Elastic‑Net (GLMNet)**; pick the largest support \(\le k\), optionally **refit** exact MVE on that support; supports fixed \(\alpha\), OOS‑CV over an \(\alpha\)-grid, and **GCV** selection. | Large \(N\), fast approximation / screening. |
-| **MIQP Heuristic Search** | Mixed‑integer quadratic model via **JuMP + CPLEX** with cardinality‑band or exact‑\(k\) and progressive bound expansion; optional **refit**. | Medium/large \(N\); high‑accuracy under time controls. |
+| **MIQP Heuristic Search** | Mixed‑integer quadratic model via **JuMP + CPLEX** with cardinality‑band or exact‑\(k\) and progressive bound expansion; optional **refit**. | Medium/large \(N\); high‑accuracy under time controls. |
 
 All methods rely on the shared [`SharpeRatio`](#sharperatio-module) and [`Utils`](#utils-module) modules for stable covariance handling and Sharpe computation.
 
@@ -51,6 +56,12 @@ julia> Pkg.instantiate()
 julia> using SparseMaxSR
 ```
 
+Or via the github repo:
+```julia
+julia> Pkg.add(url="https://github.com/a91quaini/SparseMaxSR.jl")
+```
+
+
 > Add solver backends you plan to use (e.g., `CPLEX`) to your environment.
 
 ---
@@ -62,7 +73,7 @@ All main routines return either a **named tuple** `(selection, weights, sr, stat
 | Field | Meaning |
 |:--|:--|
 | `selection` | Sorted indices of selected assets |
-| `weights` | Full‑length weight vector (zeros off‑support; present when `compute_weights=true` or by design) |
+| `weights` | Full-length weight vector (zeros off‑support; present when `compute_weights=true` or by design) |
 | `sr` | In‑sample Sharpe ratio of the returned portfolio or of the MVE refit |
 | `status` | Symbol describing the outcome (e.g., `:OK`, `:LASSO_PATH_EXACT_K`, MOI termination status, etc.) |
 
@@ -70,18 +81,20 @@ All main routines return either a **named tuple** `(selection, weights, sr, stat
 
 ## 5. Module & Function Reference
 
-Below, each function uses a uniform structure:
-**Name**, **Description** (with formulas / pseudo‑algorithm), **Arguments**, **Returns**.
+Each function uses a uniform structure: **Name**, **Description** (with formulas / pseudo‑algorithm), **Arguments**, **Returns**.
 
 ### SharpeRatio module
 
 #### `compute_sr`
 
 **Description.** Sharpe ratio of a given portfolio \(w\):
-\[
-SR(w) = \frac{w^\top \mu}{\sqrt{w^\top \Sigma_s\, w}}, \qquad 
-\Sigma_s := \text{Sym}\Big(\tfrac{\Sigma + \Sigma^\top}{2} + \epsilon\,\bar d\, I\Big),
-\]
+
+$$
+SR(w) = \frac{w^\top \mu}{\sqrt{w^\top \Sigma_s\, w}}, 
+\qquad 
+\Sigma_s := \mathrm{Sym}\!\Big(\tfrac{\Sigma + \Sigma^\top}{2} + \epsilon\,\bar d\, I\Big),
+$$
+
 where \(\bar d = \tfrac{1}{N}\operatorname{tr}(\Sigma)\) and the stabilizing ridge is controlled by `epsilon` (if `stabilize_Σ=true`). Optional `selection` restricts both numerator and denominator to a subset.
 
 **Signature.**
@@ -100,16 +113,18 @@ compute_sr(w::AbstractVector, μ::AbstractVector, Σ::AbstractMatrix;
 - `stabilize_Σ`: whether to symmetrize and ridge‑stabilize `Σ` internally.
 - `do_checks`: validate shapes/finiteness.
 
-**Returns.** `Float64` Sharpe; returns `NaN` if variance ≤ 0 or not finite.
+**Returns.** `Float64` Sharpe; returns `NaN` if variance ≤ 0 or not finite.
 
 ---
 
 #### `compute_mve_sr`
 
 **Description.** Maximum Sharpe (MVE) on a given subset \(S\):
-\[
+
+$$
 SR^\star(S) = \sqrt{\mu_S^\top \Sigma_S^{-1}\mu_S}\, .
-\]
+$$
+
 Internally uses the stabilized/symmetrized covariance \(\Sigma_s\) once per call.
 
 **Signature.**
@@ -152,14 +167,13 @@ compute_mve_weights(μ::AbstractVector, Σ::AbstractMatrix;
 #### `mve_exhaustive_search`
 
 **Description.** Best‑subset search for MVE Sharpe at fixed cardinality \(k\).  
-Two modes:
-1) **Enumeration** of all \(\binom{N}{k}\) supports;  
-2) **Sampling** of `max_samples` supports (without replacement within a support), optionally deduplicated.
+Two modes: (i) **Enumeration** of all \(\binom{N}{k}\) supports; (ii) **Sampling** of `max_samples` supports (without replacement within a support), optionally deduplicated.
 
 Scoring uses a single stabilized covariance \(\Sigma_s\) and
-\[
-SR^\star(S) = \sqrt{\mu_S^\top \Sigma_{s,S}^{-1}\mu_S}.
-\]
+
+$$
+SR^\star(S) = \sqrt{\mu_S^\top \Sigma_{s,S}^{-1}\mu_S}\, .
+$$
 
 **Signature.**
 ```julia
@@ -178,7 +192,7 @@ mve_exhaustive_search(μ::AbstractVector{<:Real},
 
 **Arguments.**
 - `μ`, `Σ`: asset moments.
-- `k`: subset size (1 ≤ k ≤ N).
+- `k`: subset size (1 ≤ k ≤ N).
 - `enumerate_all`: `true` → enumerate; `false` → sample.
 - `max_samples`: number of sampled supports if `enumerate_all=false`.
 - `dedup_samples`: ensure distinct supports when sampling.
@@ -188,43 +202,49 @@ mve_exhaustive_search(μ::AbstractVector{<:Real},
 **Returns.**
 - `(selection::Vector{Int}, sr::Float64)` — best support and its in‑sample MVE Sharpe.
 
-> For grid evaluations across many `k`, see `mve_exhaustive_search_gridk`.
+> For grid evaluations across many `k`, a lightweight wrapper can be used.
 
 ---
 
 ### LassoRelaxationSearch module
 
-The LASSO/Elastic‑Net relaxation is built on a regression path (no intercept) and a **support‑size rule**: choose the column on the path whose support size is the **largest ≤ k** (closest from below). Two entry points exist.
+The LASSO/Elastic‑Net relaxation is built on a regression path (no intercept) and a **support‑size rule**: choose the column on the path whose support size is the **largest ≤ k** (closest from below). Two entry points exist.
 
-Mathematically, the GLMNet path solves, for a given \((\alpha,\lambda)\),
-\[
+Mathematically, for given \((\alpha,\lambda)\), the GLMNet path solves
+
+$$
 \min_{\beta \in \mathbb{R}^N} \;
 \frac{1}{2T}\,\lVert y - X\beta \rVert_2^2
 \;+\;
 \lambda\!\left(\frac{1-\alpha}{2}\lVert\beta\rVert_2^2 + \alpha \lVert\beta\rVert_1\right),
 \qquad \alpha \in [0,1].
-\]
-Selection is by the **largest support ≤ k** along the path, then either:
+$$
+
+Selection is by the **largest support ≤ k** along the path, then either:
 - **Refit** exact MVE on that support (recommended), or
 - Return the **vanilla** LASSO portfolio built from the coefficients (optionally normalized).
 
 Both entry points support three ways to specify \(\alpha\):
 - `alpha_select = :fixed` (default): scalar \(\alpha\). If `alpha` is a vector and `:fixed`, an **OOS cross‑validation** over the grid is performed (forward‑rolling folds).
 - `alpha_select = :oos_cv`: explicit OOS‑CV over an `alpha`‑grid (requires `R` in the moment‑based API).
-- `alpha_select = :gcv`: **generalized cross‑validation** over an `alpha`‑grid (no folds). For each \(\alpha\), pick \(\lambda\) by the strict target‑\(k\) rule; compute log‑GCV using a **ridge‑only degrees of freedom** on the selected set:
-  \[
-  \mathrm{df}(\alpha,\lambda;A) \;=\; \operatorname{tr}\!\left( S_A \, (S_A + \lambda_2 I)^{-1} \right),\quad
-  S_A = X_A^\top X_A,\ \lambda_2 = \lambda(1-\alpha).
-  \]
-  The log‑GCV criterion is
-  \[
-  \log\mathrm{GCV} = \log(\mathrm{RSS}) - 2\log\!\Big(1-\tfrac{\mathrm{df}}{\kappa T}\Big) - \log T,
-  \]
-  with stability parameter \(\kappa\) (argument `gcv_kappa`). The \(\alpha\) with the **smallest** log‑GCV is selected. If no \(\lambda\) attains \(|A|\le k\) for any \(\alpha\), the function returns zeros with status `:LASSO_GCV_INFEASIBLE`.
+- `alpha_select = :gcv`: **generalized cross‑validation** over an `alpha`‑grid (no folds). For each \(\alpha\), pick \(\lambda\) by the strict target‑\(k\) rule; compute log‑GCV using a ridge‑only degrees of freedom on the selected set:
+
+$$
+\mathrm{df}(\alpha,\lambda;A) \;=\; \operatorname{tr}\!\big( S_A \, (S_A + \lambda_2 I)^{-1} \big),\quad
+S_A = X_A^\top X_A,\ \lambda_2 = \lambda(1-\alpha).
+$$
+
+The log‑GCV criterion is
+
+$$
+\log\mathrm{GCV} \;=\; \log(\mathrm{RSS}) - 2\log\!\Big(1-\tfrac{\mathrm{df}}{\kappa T}\Big) - \log T,
+$$
+
+with stability parameter \(\kappa\) (argument `gcv_kappa`). The \(\alpha\) with the **smallest** log‑GCV is selected. If no \(\lambda\) attains \(|A|\le k\) for any \(\alpha\), the function returns zeros with status `:LASSO_GCV_INFEASIBLE`.
 
 #### `mve_lasso_relaxation_search` — R‑based
 
-**Description.** Builds the path directly on raw returns \(R\) and optional response \(y\) (default: a vector of ones). Supports fixed \(\alpha\), OOS‑CV on an \(\alpha\)-grid, or GCV over an \(\alpha\)-grid. Final output is either **refit** MVE on the selected support or **vanilla** LASSO weights from the chosen column.
+**Description.** Builds the path directly on raw returns \(R\) and optional response \(y\) (default: a vector of ones). Supports fixed \(\alpha\), OOS‑CV on an \(\alpha\)-grid, and **GCV** on an \(\alpha\)-grid. Final output is either **refit** MVE on the selected support or **vanilla** LASSO weights from the chosen column.
 
 **Signature.**
 ```julia
@@ -274,18 +294,19 @@ mve_lasso_relaxation_search(R::AbstractMatrix{<:Real};
 
 #### `mve_lasso_relaxation_search` — moment‑based
 
-**Description.** Constructs a **synthetic design** \((X,y)\) from \((\mu,\Sigma,T)\) and proceeds as above. Optionally provide `R` to enable OOS‑CV over an \(\alpha\)-grid.  
+**Description.** Constructs a **synthetic design** \((X,y)\) from \((\mu,\Sigma,T)\) and proceeds as above. Supports fixed \(\alpha\), **OOS‑CV** over an \(\alpha\)-grid **(when `R` is provided)**, and **GCV** over an \(\alpha\)-grid **without needing `R`** (GCV runs on the synthetic design).  
 Synthetic design (with stabilized \(\Sigma_s\)) is:
-\[
+
+$$
 Q = T(\Sigma_s + \mu\mu^\top), \quad U^\top U = Q,\quad X = U^\top,\quad y = U \backslash (T\mu).
-\]
+$$
 
 **Signature.**
 ```julia
 mve_lasso_relaxation_search(μ::AbstractVector{<:Real},
                             Σ::AbstractMatrix{<:Real},
                             T::Integer;
-    R::Union{Nothing,AbstractMatrix{<:Real}} = nothing,   # enables OOS α‑CV
+    R::Union{Nothing,AbstractMatrix{<:Real}} = nothing,   # enables OOS α-CV
     k::Integer,
     nlambda::Int = 100,
     lambda_min_ratio::Real = 1e-3,
@@ -307,10 +328,10 @@ mve_lasso_relaxation_search(μ::AbstractVector{<:Real},
 
 **Arguments.**
 - `μ`, `Σ`, `T`: moments and (effective) sample size for the synthetic design.
-- `R` (optional): raw returns to enable OOS α‑CV (`:fixed` with vector `alpha`, or `:oos_cv` mode).
-- Remaining arguments/semantics as in the R‑based entry point.
+- `R` (optional): raw returns to enable **OOS α‑CV** (`:fixed` with vector `alpha`, or `:oos_cv` mode). **Not required for `:gcv`**.
+- Remaining arguments/semantics as in the R‑based entry point (including `alpha_select` and `gcv_kappa`).
 
-**Returns.** As in the R‑based entry point (including the `alpha` used).
+**Returns.** Same fields as the R‑based entry point, including the selected `alpha`.
 
 ---
 
@@ -319,23 +340,25 @@ mve_lasso_relaxation_search(μ::AbstractVector{<:Real},
 #### `mve_miqp_heuristic_search`
 
 **Description.** Heuristic MIQP for sparse MVE **selection** with box bounds and a cardinality **band** or **exact‑k**. The core model (with stabilized/symmetrized \(\Sigma_s\)) is:
-\[
+
+$$
 \begin{aligned}
 \min_{x,v}\quad & \tfrac{1}{2}\,\gamma\, x^\top \Sigma_s x - \mu^\top x \\
 \text{s.t.}\quad
-& m \le \sum_i v_i \le k \quad (\text{or } \sum_i v_i = k \text{ if exact}) ,\\
+& m \le \sum_i v_i \le k \quad (\text{or } \sum_i v_i = k \text{ if exact}),\\
 & v_i = 0 \Rightarrow x_i = 0,\qquad
   v_i = 1 \Rightarrow f_{\min,i} \le x_i \le f_{\max,i},\\
 & v_i \in \{0,1\}. 
 \end{aligned}
-\]
+$$
+
 If `normalize_weights=true`, the budget \(\sum_i x_i = 1\) is **added** and outputs are normalized accordingly.  
 A progressive **bound‑expansion** loop (up to `expand_rounds`) relaxes tight bounds and re‑solves.
 
 **Pseudo‑algorithm (high‑level).**
-1. Build \(\Sigma_s\) once; set band \(m\le\sum v_i\le k\) (or exact‑\(k\)).
-2. Solve MIQP with indicator/big‑M linking and caps \([f_{\min},f_{\max}]\).
-3. If some chosen \(x_i\) is near a bound, expand that bound and re‑solve (repeat up to `expand_rounds`).
+1. Build \(\Sigma_s\) once; set band \(m\le\sum v_i\le k\) (or exact‑\(k\)).  
+2. Solve MIQP with indicator/big‑M linking and caps \([f_{\min},f_{\max}]\).  
+3. If some chosen \(x_i\) is near a bound, expand that bound and re‑solve (repeat up to `expand_rounds`).  
 4. Extract support \(S=\{i: v_i=1\}\).  
    - **Refit**: compute \(SR^\star(S)\) and (optionally) \(w_{\text{MVE}}(S)\).  
    - **Vanilla**: keep the MIQP weights \(x\) (optionally normalized).
@@ -393,8 +416,8 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
 
 **Description.** Stable post‑scaling of a weight vector.  
 Modes:
-- `:absolute` — divide by \(\max(|\sum w|,\ \text{tol},\ 1\!e\!-\!10)\).
-- `:relative` (default) — divide by \(\max(|\sum w|,\ \text{tol}\,\lVert w\rVert_1,\ 1\!e\!-\!10)\).
+- `:absolute` — divide by \(\max(|\sum w|,\ \text{tol},\ 1\mathrm{e}{-10})\).  
+- `:relative` (default) — divide by \(\max(|\sum w|,\ \text{tol}\,\lVert w\rVert_1,\ 1\mathrm{e}{-10})\).
 
 If both \(\sum w\) and \(\lVert w\rVert_1\) are tiny, returns the zero vector.
 

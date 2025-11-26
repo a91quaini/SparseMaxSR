@@ -58,6 +58,29 @@ function run_miqp_refit(μ, Σ, k)
     return res.selection, res.weights, res.sr, res.status, tsec
 end
 
+# LASSO (moment-only entry, requires R)
+function run_lasso(μ, Σ, k)
+    tsec = 0.0
+    res = nothing
+    tsec = @elapsed begin
+        res = SparseMaxSR.mve_lasso_relaxation_search(
+            μ, Σ, size(R,1);
+            k = k,
+            nlambda = 100,
+            lambda_min_ratio = 1e-3,
+            alpha = 1,             # GRID → OOS‑CV
+            standardize = false,
+            epsilon = SparseMaxSR.EPS_RIDGE,
+            stabilize_Σ = true,
+            compute_weights = true,    # request refit weights
+            normalize_weights = false,
+            use_refit = false,          # REFIT (exact MVE on support)
+            do_checks = false
+        )
+    end
+    return res.selection, res.weights, res.sr, res.status, res.alpha, tsec
+end
+
 # LASSO-REFIT with α-grid OOS‑CV (moment-only entry, requires R)
 function run_lasso_refit_cv(R, μ, Σ, k; agrid = collect(0.05:0.05:0.95), cv_folds::Int=5)
     tsec = 0.0
@@ -160,9 +183,9 @@ end
 # Experiment A (small & fast): T=120, N=30, k in {5, 10}
 # =============================================================================
 Random.seed!(42)
-T, N = 120, 300
-ks = [5, 10]
-methods = ["LASSO-r (α fixed)", "LASSO-r (α OOS‑CV)", "LASSO-r (α GCV)", "MIQP‑REFIT"]
+T, N = 120, 100
+ks = [5, 10, 15]
+methods = ["LASSO", "LASSO-r (α OOS‑CV)", "LASSO-r (α GCV)", "MIQP‑REFIT"]
 cells = Dict{Tuple{Int,String},String}()
 
 lasso_almost = Int[]
@@ -177,19 +200,33 @@ R = simulate_returns(T, N)
 agrid = collect(0.15:0.10:0.95)
 
 for k in ks
-    # LASSO-REFIT (α fixed)
+    # LASSO
     try
-        _, _, sr, st, α, t = run_lasso_refit_fixed(R, μ, Σ, k; alpha=0.4)
+        _, _, sr, st, α, t = run_lasso(μ, Σ, k)
         label = (st == :LASSO_ALLEMPTY) ? @sprintf("EMPTY / %.2fs", t) : @sprintf("%s | α=%.2f", cell(sr, t), α)
-        cells[(k,"LASSO-r (α fixed)")] = label
+        cells[(k,"LASSO")] = label
         if st == :LASSO_PATH_ALMOST_K
             push!(lasso_almost, k)
         elseif st == :LASSO_ALLEMPTY
             push!(lasso_empty, k)
         end
     catch
-        cells[(k,"LASSO-r (α fixed)")] = "ERR"
+        cells[(k,"LASSO")] = "ERR"
     end
+    
+    # LASSO-REFIT (α fixed)
+    #try
+    #    _, _, sr, st, α, t = run_lasso_refit_fixed(R, μ, Σ, k; alpha=0.4)
+    #    label = (st == :LASSO_ALLEMPTY) ? @sprintf("EMPTY / %.2fs", t) : @sprintf("%s | α=%.2f", cell(sr, t), α)
+    #    cells[(k,"LASSO-r (α fixed)")] = label
+    #    if st == :LASSO_PATH_ALMOST_K
+    #        push!(lasso_almost, k)
+    #    elseif st == :LASSO_ALLEMPTY
+    #        push!(lasso_empty, k)
+    #    end
+    #catch
+    #    cells[(k,"LASSO-r (α fixed)")] = "ERR"
+    #end
 
     # LASSO-REFIT (α OOS‑CV)
     try

@@ -7,4 +7,5 @@ using SparseMaxSR
     include("test-ExhaustiveSearch.jl")
     include("test-MIQPHeuristicSearch.jl")
     include("test-LassoRelaxationSearch.jl")
+    # include("test-thread_safety.jl")
 end

@@ -12,8 +12,8 @@ module MIQPHeuristicSearch
 # - All solver attributes are set in try/catch blocks for portability.
 #
 # Public API:
-#   mve_miqp_heuristic_search(μ, Σ; k, exactly_k=false, m=nothing, γ=1.0,
-#                              fmin=0.0, fmax=1.0, expand_rounds=20,
+#   mve_miqp_heuristic_search(μ, Σ; k, exactly_k=false, m=1, γ=1.0,
+#                              fmin=-0.25, fmax=0.25, expand_rounds=20,
 #                              expand_factor=3.0, expand_tol=1e-2,
 #                              mipgap=1e-4, time_limit=200, threads=0,
 #                              compute_weights=true, normalize_weights=false,
@@ -130,7 +130,9 @@ function _solve_once!(μ::Vector{Float64},
                       time_limit::Real,
                       threads::Int,
                       verbose::Bool,
-                      epsilon::Float64)
+                      epsilon::Float64,
+                      x0::Union{Nothing,AbstractVector}=nothing,   
+                      v0::Union{Nothing,AbstractVector}=nothing)   
 
     # Build model with CPLEX if present; otherwise default solver-less Model()
     model = _has_cplex ? Model(CPLEX.Optimizer) : Model()
@@ -166,9 +168,20 @@ function _solve_once!(μ::Vector{Float64},
     catch
     end
 
-    # Decision variables with explicit, sanitized bounds
     @variable(model, fmin[i] <= x[i=1:N] <= fmax[i])
     @variable(model, v[i=1:N], Bin)
+
+    # ── Warm starts (if provided)
+    if x0 !== nothing
+        @inbounds for i in 1:N
+            set_start_value(x[i], Float64(x0[i]))
+        end
+    end
+    if v0 !== nothing
+        @inbounds for i in 1:N
+            set_start_value(v[i], Int(v0[i]))
+        end
+    end
 
     # Budget constraint only if we aim to return sum(w)=1 weights
     if budget_constraint
@@ -230,10 +243,10 @@ end
     mve_miqp_heuristic_search(μ, Σ;
         k::Int,
         exactly_k::Bool=false,
-        m::Union{Nothing,Int}=nothing,
+        m::Union{Nothing,Int}=1,
         γ::Real=1.0,
-        fmin=0.0,
-        fmax=1.0,
+        fmin=-0.25,
+        fmax=0.25,
         expand_rounds::Int=20,
         expand_factor::Float64=3.0,
         expand_tol::Float64=1e-2,
@@ -264,50 +277,56 @@ Key behaviors:
 
 Returns `(selection, weights, sr, status)`.
 """
-function mve_miqp_heuristic_search(μ::AbstractVector{<:Real},
-                                   Σ::AbstractMatrix{<:Real};
-                                   k::Int,
-                                   exactly_k::Bool=false,
-                                   m::Union{Nothing,Int}=nothing,
-                                   γ::Real=1.0,
-                                   fmin=0.0,
-                                   fmax=1.0,
-                                   expand_rounds::Int=20,
-                                   expand_factor::Float64=3.0,
-                                   expand_tol::Float64=1e-2,
-                                   mipgap::Float64=1e-4,
-                                   time_limit::Real=200,
-                                   threads::Int=0,
-                                   compute_weights::Bool=true,
-                                   normalize_weights::Bool=false,
-                                   use_refit::Bool=false,
-                                   verbose::Bool=false,
-                                   epsilon::Real=Utils.EPS_RIDGE,
-                                   stabilize_Σ::Bool=true,
-                                   do_checks::Bool=false)
+function mve_miqp_heuristic_search(
+    μ::AbstractVector, Σ::AbstractMatrix; k::Int,
+    exactly_k::Bool=false,
+    m::Union{Int,Nothing}=1,
+    γ::Float64=1.0,
+    fmin::AbstractVector=fill(-0.25,length(μ)),
+    fmax::AbstractVector=fill(0.25,length(μ)),
+    expand_rounds::Int=20, expand_factor::Float64=3.0, expand_tol::Float64=1e-2,
+    mipgap::Float64=1e-4, time_limit::Real=200, threads::Int=0,
+    x_start::Union{Nothing,AbstractVector}=nothing,     
+    v_start::Union{Nothing,AbstractVector}=nothing,     
+    compute_weights::Bool=true,
+    normalize_weights::Bool=false,                      # toggles budget
+    use_refit::Bool=false,
+    verbose::Bool=false, epsilon::Real=Utils.EPS_RIDGE,
+    stabilize_Σ::Bool=true, do_checks::Bool=false
+)
 
     N = length(μ)
     μf = Float64.(μ)
 
     # Effective cardinality lower bound
-    m_eff = isnothing(m) ? max(0, k-1) : Int(m)
-    if exactly_k
-        m_eff = k
-    end
+    m_eff = exactly_k ? k : (isnothing(m) ? max(0, k-1) : m)    
 
     if do_checks
-        N > 0 || error("μ must be non-empty.")
-        size(Σ) == (N, N) || error("Σ must be N×N (got $(size(Σ))).")
-        1 ≤ k ≤ N || error("k must be between 1 and N.")
-        0 ≤ m_eff ≤ k || error("m must be in [0,k].")
-        isfinite(γ) && γ > 0 || error("γ must be a positive finite number.")
-        isfinite(epsilon) || error("epsilon must be finite.")
-        isfinite(expand_factor) && expand_factor > 0 || error("expand_factor must be > 0.")
-        expand_rounds ≥ 0 || error("expand_rounds must be ≥ 0.")
-        expand_tol ≥ 0 || error("expand_tol must be ≥ 0.")
-        mipgap ≥ 0 || error("mipgap must be ≥ 0.")
-        threads ≥ 0 || error("threads must be ≥ 0.")
+        size(Σ,1)==N && size(Σ,2)==N || error("Σ must be N×N.")
+        1 ≤ k ≤ N || error("1 ≤ k ≤ N required.")
+        0 ≤ m_eff ≤ k || error("0 ≤ m ≤ k required.")
+        length(fmin)==N && length(fmax)==N || error("fmin, fmax must be length N.")
+        γ > 0 || error("γ must be positive.")
+        expand_rounds ≥ 0 || error("expand_rounds ≥ 0.")
+        expand_factor > 0 || error("expand_factor > 0.")
+        expand_tol ≥ 0 || error("expand_tol ≥ 0.")
+        mipgap ≥ 0 || error("mipgap ≥ 0.")
+        threads ≥ 0 || error("threads ≥ 0.")
+        x_start === nothing || length(x_start) == N || error("x_start length N.")
+        v_start === nothing || length(v_start) == N || error("v_start length N.")
         all(isfinite, μ) && all(isfinite, Σ) || error("μ and Σ must be finite.")
+        @inbounds for i in 1:N
+            fmin[i] ≤ fmax[i] || error("Require fmin[i] ≤ fmax[i] for all i.")
+        end
+        if normalize_weights
+            smin = 0.0; smax = 0.0
+            @inbounds for i in 1:N
+                smin += min(0.0, fmin[i])
+                smax += max(0.0, fmax[i])
+            end
+            (1.0 ≥ smin - 1e-12 && 1.0 ≤ smax + 1e-12) ||
+                error("Budget ∑x=1 incompatible with caps (quick screen).")
+        end
     end
 
     # Prepare Σ once
@@ -325,15 +344,12 @@ function mve_miqp_heuristic_search(μ::AbstractVector{<:Real},
 
     # First solve with try/catch guard
     sol = try
-        _solve_once!(μf, Σs, N, k, m_eff, Float64(γ),
-                     fmin_work, fmax_work;
-                     budget_constraint=budget_on,
-                     exactly_k=exactly_k,
-                     mipgap=Float64(mipgap),
-                     time_limit=time_limit,
-                     threads=threads,
-                     verbose=verbose,
-                     epsilon=Float64(epsilon))
+        _solve_once!(μ, Σs, N, k, m_eff, γ, fmin_work, fmax_work;
+                       budget_constraint=budget_on,
+                       exactly_k=exactly_k,
+                       x0=x_start, v0=v_start,             # <── pass warm starts
+                       mipgap=mipgap, time_limit=time_limit, threads=threads,
+                       verbose=verbose, epsilon=epsilon)
     catch err
         @debug "MIQP initial solve failed" err
         return _fallback_result(N, :ERROR)

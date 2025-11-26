@@ -8,6 +8,7 @@ include("SparseMaxSR/Utils.jl")
 include("SparseMaxSR/SharpeRatio.jl")
 include("SparseMaxSR/ExhaustiveSearch.jl")
 include("SparseMaxSR/MIQPHeuristicSearch.jl")
+include("SparseMaxSR/LassoRelaxationUtils.jl")
 include("SparseMaxSR/LassoRelaxationSearch.jl")
 
 # Bring submodules into this namespace
@@ -15,6 +16,7 @@ using .Utils
 using .SharpeRatio
 using .ExhaustiveSearch
 using .MIQPHeuristicSearch
+using .LassoRelaxationUtils
 using .LassoRelaxationSearch
 
 # --- Re-exports ---

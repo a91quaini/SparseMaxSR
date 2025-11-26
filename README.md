@@ -368,10 +368,10 @@ A progressive **bound‑expansion** loop (up to `expand_rounds`) relaxes tight b
 mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
     k::Integer,
     exactly_k::Bool=false,
-    m::Union{Int,Nothing}=nothing,           # default: max(0, k-1)
+    m::Union{Int,Nothing}=1,
     γ::Float64=1.0,
-    fmin::AbstractVector=zeros(length(μ)),
-    fmax::AbstractVector=ones(length(μ)),
+    fmin::AbstractVector=fill(-0.25, length(μ)),
+    fmax::AbstractVector=fill(0.25, length(μ)),
     expand_rounds::Int=20,
     expand_factor::Float64=3.0,
     expand_tol::Float64=1e-2,
@@ -380,9 +380,9 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
     threads::Int=0,
     x_start::Union{Nothing,AbstractVector}=nothing,
     v_start::Union{Nothing,AbstractVector}=nothing,
-    compute_weights::Bool=false,
+    compute_weights::Bool=true,
     normalize_weights::Bool=false,   # also toggles budget ∑x=1
-    use_refit::Bool=true,
+    use_refit::Bool=false,
     epsilon::Real=Utils.EPS_RIDGE,
     stabilize_Σ::Bool=true,
     verbose::Bool=false,
@@ -392,14 +392,14 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
 
 **Arguments.**
 - `μ`, `Σ`, `k`: asset moments and target cardinality (`k` is an upper bound unless `exactly_k=true`).
-- `exactly_k`, `m`: exact‑\(k\) or band (default `m=max(0,k-1)`).
+- `exactly_k`, `m`: exact‑\(k\) or band (default `m=1`, minimum cardinality ensures at least one asset is selected; when `exactly_k=true`, `m` is overridden to equal `k`).
 - `γ`: risk‑aversion scale (just rescales the quadratic term).
-- `fmin`, `fmax`: lower/upper caps active when an asset is selected.
+- `fmin`, `fmax`: lower/upper caps active when an asset is selected (default: `[-0.25, 0.25]` allows both long and short positions).
 - `expand_rounds`, `expand_factor`, `expand_tol`: bound‑expansion controls.
 - `mipgap`, `time_limit`, `threads`, `x_start`, `v_start`: MIP controls and warm starts.
-- `compute_weights`: if `true`, return weights (refit or vanilla as per `use_refit`).
-- `normalize_weights`: adds \(\sum x = 1\) inside MIQP and normalizes outputs (or refit weights).
-- `use_refit`: if `true`, compute exact MVE Sharpe/weights on the final support; else keep MIQP portfolio `x`.
+- `compute_weights`: if `true`, return weights (refit or vanilla as per `use_refit`; default `true`).
+- `normalize_weights`: adds \(\sum x = 1\) inside MIQP and normalizes outputs (or refit weights); default `false` for scale‑invariant portfolios.
+- `use_refit`: if `true`, compute exact MVE Sharpe/weights on the final support; else keep MIQP portfolio `x` (default `false` for vanilla MIQP weights).
 - `epsilon`, `stabilize_Σ`, `verbose`, `do_checks`: numerics and I/O.
 
 **Returns.**

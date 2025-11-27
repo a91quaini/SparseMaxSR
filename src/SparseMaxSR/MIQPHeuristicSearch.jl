@@ -10,12 +10,13 @@ module MIQPHeuristicSearch
 # - The budget constraint ∑x=1 is toggled by `normalize_weights`.
 # - `use_refit=true` recomputes exact MVE SR/weights on the selected support.
 # - All solver attributes are set in try/catch blocks for portability.
+# - Thread-safe: BLAS threads are temporarily set to 1 during solve and restored.
 #
 # Public API:
 #   mve_miqp_heuristic_search(μ, Σ; k, exactly_k=false, m=1, γ=1.0,
 #                              fmin=-0.25, fmax=0.25, expand_rounds=20,
 #                              expand_factor=3.0, expand_tol=1e-2,
-#                              mipgap=1e-4, time_limit=200, threads=0,
+#                              mipgap=1e-4, time_limit=200, threads=1,
 #                              compute_weights=true, normalize_weights=false,
 #                              use_refit=false, verbose=false,
 #                              epsilon=Utils.EPS_RIDGE, stabilize_Σ=true,
@@ -27,6 +28,7 @@ module MIQPHeuristicSearch
 using LinearAlgebra
 using JuMP
 import MathOptInterface as MOI
+import LinearAlgebra.BLAS
 
 # Prefer CPLEX if available in the environment; otherwise fall back to default.
 # (The package declares CPLEX as a dependency, but we still guard the import.)
@@ -134,105 +136,110 @@ function _solve_once!(μ::Vector{Float64},
                       x0::Union{Nothing,AbstractVector}=nothing,   
                       v0::Union{Nothing,AbstractVector}=nothing)   
 
-    # Build model with CPLEX if present; otherwise default solver-less Model()
-    model = _has_cplex ? Model(CPLEX.Optimizer) : Model()
-    if !verbose
-        set_silent(model)
-    end
-
-    # Generic attribute settings guarded by try/catch — portable across solvers
+    # Save current BLAS thread count and set to 1 for thread safety
+    old_blas_threads = BLAS.get_num_threads()
+    BLAS.set_num_threads(1)
+    
     try
-        if _has_cplex
-            set_optimizer_attribute(model, "MIPGap", mipgap)
-            set_optimizer_attribute(model, "CPX_PARAM_NUMERICALEMPHASIS", 1)
-            set_optimizer_attribute(model, "CPX_PARAM_EPRHS", 1e-9)
-            set_optimizer_attribute(model, "CPX_PARAM_EPOPT", 1e-9)
-            set_optimizer_attribute(model, "CPX_PARAM_EPINT", 1e-9)
-            set_optimizer_attribute(model, "CPX_PARAM_POLISHAFTERNODE", 1)
-            if threads > 0
+        # Build model with CPLEX if present; otherwise default solver-less Model()
+        model = _has_cplex ? Model(CPLEX.Optimizer) : Model()
+        if !verbose
+            set_silent(model)
+        end
+
+        # Generic attribute settings guarded by try/catch — portable across solvers
+        try
+            if _has_cplex
+                set_optimizer_attribute(model, "MIPGap", mipgap)
+                set_optimizer_attribute(model, "CPX_PARAM_NUMERICALEMPHASIS", 1)
+                set_optimizer_attribute(model, "CPX_PARAM_EPRHS", 1e-9)
+                set_optimizer_attribute(model, "CPX_PARAM_EPOPT", 1e-9)
+                set_optimizer_attribute(model, "CPX_PARAM_EPINT", 1e-9)
+                set_optimizer_attribute(model, "CPX_PARAM_POLISHAFTERNODE", 1)
                 set_optimizer_attribute(model, "CPX_PARAM_THREADS", threads)
-            end
-        else
-            MOI.set(model, MOI.RawParameter("MIPGap"), mipgap)
-            if threads > 0
+            else
+                MOI.set(model, MOI.RawParameter("MIPGap"), mipgap)
                 MOI.set(model, MOI.RawParameter("Threads"), threads)
             end
+        catch
+            # ignore unsupported attributes
         end
-    catch
-        # ignore unsupported attributes
-    end
-    try
-        if isfinite(time_limit)
-            MOI.set(model, MOI.TimeLimitSec(), float(time_limit))
+        try
+            if isfinite(time_limit)
+                MOI.set(model, MOI.TimeLimitSec(), float(time_limit))
+            end
+        catch
         end
-    catch
-    end
 
-    @variable(model, fmin[i] <= x[i=1:N] <= fmax[i])
-    @variable(model, v[i=1:N], Bin)
+        @variable(model, fmin[i] <= x[i=1:N] <= fmax[i])
+        @variable(model, v[i=1:N], Bin)
 
-    # ── Warm starts (if provided)
-    if x0 !== nothing
+        # ── Warm starts (if provided)
+        if x0 !== nothing
+            @inbounds for i in 1:N
+                set_start_value(x[i], Float64(x0[i]))
+            end
+        end
+        if v0 !== nothing
+            @inbounds for i in 1:N
+                set_start_value(v[i], Int(v0[i]))
+            end
+        end
+
+        # Budget constraint only if we aim to return sum(w)=1 weights
+        if budget_constraint
+            @constraint(model, sum(x) == 1.0)
+        end
+
+        # Cardinality: band or exact k
+        if exactly_k
+            @constraint(model, sum(v) == k)
+        else
+            @constraint(model, m <= sum(v) <= k)
+        end
+
+        # Linking constraints (big-M style with local bounds)
+        @constraint(model, [i=1:N], x[i] <= fmax[i] * v[i])
+        @constraint(model, [i=1:N], x[i] >= fmin[i] * v[i])
+
+        # Robust quadratic objective: Min 0.5*γ x'Σs x - μ'x
+        @objective(model, Min, 0.5 * γ * dot(x, Σs * x) - dot(μ, x))
+
+        optimize!(model)
+
+        # If no result, return error tuple
+        rc = try MOI.get(model, MOI.ResultCount()) catch; 0 end
+        if rc == 0
+            st = try termination_status(model) catch; :ERROR end
+            return (x=zeros(Float64, N), v=zeros(Int, N), sr=-Inf, status=st, obj=NaN)
+        end
+
+        # Extract values, sanitize
+        xx = try value.(x) catch; fill(NaN, N) end
+        vv = try value.(v) catch; fill(NaN, N) end
+
+        # Hard threshold binaries; zero out tiny weights when v=0
         @inbounds for i in 1:N
-            set_start_value(x[i], Float64(x0[i]))
+            vi = (isfinite(vv[i]) && vv[i] ≥ 0.5) ? 1 : 0
+            vv[i] = vi
+            xi = isfinite(xx[i]) ? xx[i] : 0.0
+            if vi == 0 && abs(xi) ≤ 1e-12
+                xi = 0.0
+            end
+            xx[i] = xi
         end
+
+        # Compute SR on Σs (no extra stabilization)
+        sr = SharpeRatio.compute_sr(xx, μ, Σs; epsilon=epsilon, stabilize_Σ=false, do_checks=false)
+        sr = isfinite(sr) ? sr : -Inf
+
+        st = try termination_status(model) catch; :UNKNOWN end
+        obj = try objective_value(model) catch; NaN end
+        return (x=Float64.(xx), v=Int.(vv), sr=sr, status=st, obj=obj)
+    finally
+        # Restore original BLAS thread count
+        BLAS.set_num_threads(old_blas_threads)
     end
-    if v0 !== nothing
-        @inbounds for i in 1:N
-            set_start_value(v[i], Int(v0[i]))
-        end
-    end
-
-    # Budget constraint only if we aim to return sum(w)=1 weights
-    if budget_constraint
-        @constraint(model, sum(x) == 1.0)
-    end
-
-    # Cardinality: band or exact k
-    if exactly_k
-        @constraint(model, sum(v) == k)
-    else
-        @constraint(model, m <= sum(v) <= k)
-    end
-
-    # Linking constraints (big-M style with local bounds)
-    @constraint(model, [i=1:N], x[i] <= fmax[i] * v[i])
-    @constraint(model, [i=1:N], x[i] >= fmin[i] * v[i])
-
-    # Robust quadratic objective: Min 0.5*γ x'Σs x - μ'x
-    @objective(model, Min, 0.5 * γ * dot(x, Σs * x) - dot(μ, x))
-
-    optimize!(model)
-
-    # If no result, return error tuple
-    rc = try MOI.get(model, MOI.ResultCount()) catch; 0 end
-    if rc == 0
-        st = try termination_status(model) catch; :ERROR end
-        return (x=zeros(Float64, N), v=zeros(Int, N), sr=-Inf, status=st, obj=NaN)
-    end
-
-    # Extract values, sanitize
-    xx = try value.(x) catch; fill(NaN, N) end
-    vv = try value.(v) catch; fill(NaN, N) end
-
-    # Hard threshold binaries; zero out tiny weights when v=0
-    @inbounds for i in 1:N
-        vi = (isfinite(vv[i]) && vv[i] ≥ 0.5) ? 1 : 0
-        vv[i] = vi
-        xi = isfinite(xx[i]) ? xx[i] : 0.0
-        if vi == 0 && abs(xi) ≤ 1e-12
-            xi = 0.0
-        end
-        xx[i] = xi
-    end
-
-    # Compute SR on Σs (no extra stabilization)
-    sr = SharpeRatio.compute_sr(xx, μ, Σs; epsilon=epsilon, stabilize_Σ=false, do_checks=false)
-    sr = isfinite(sr) ? sr : -Inf
-
-    st = try termination_status(model) catch; :UNKNOWN end
-    obj = try objective_value(model) catch; NaN end
-    return (x=Float64.(xx), v=Int.(vv), sr=sr, status=st, obj=obj)
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -252,7 +259,7 @@ end
         expand_tol::Float64=1e-2,
         mipgap::Float64=1e-4,
         time_limit::Real=200,
-        threads::Int=0,
+        threads::Int=1,
         compute_weights::Bool=true,
         normalize_weights::Bool=false,
         use_refit::Bool=false,
@@ -285,7 +292,7 @@ function mve_miqp_heuristic_search(
     fmin::AbstractVector=fill(-0.25,length(μ)),
     fmax::AbstractVector=fill(0.25,length(μ)),
     expand_rounds::Int=20, expand_factor::Float64=3.0, expand_tol::Float64=1e-2,
-    mipgap::Float64=1e-4, time_limit::Real=200, threads::Int=0,
+    mipgap::Float64=1e-4, time_limit::Real=200, threads::Int=1,
     x_start::Union{Nothing,AbstractVector}=nothing,     
     v_start::Union{Nothing,AbstractVector}=nothing,     
     compute_weights::Bool=true,

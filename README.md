@@ -377,7 +377,7 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
     expand_tol::Float64=1e-2,
     mipgap::Float64=1e-4,
     time_limit::Real=200,
-    threads::Int=0,
+    threads::Int=1,
     x_start::Union{Nothing,AbstractVector}=nothing,
     v_start::Union{Nothing,AbstractVector}=nothing,
     compute_weights::Bool=true,
@@ -396,11 +396,13 @@ mve_miqp_heuristic_search(μ::AbstractVector, Σ::AbstractMatrix;
 - `γ`: risk‑aversion scale (just rescales the quadratic term).
 - `fmin`, `fmax`: lower/upper caps active when an asset is selected (default: `[-0.25, 0.25]` allows both long and short positions).
 - `expand_rounds`, `expand_factor`, `expand_tol`: bound‑expansion controls.
-- `mipgap`, `time_limit`, `threads`, `x_start`, `v_start`: MIP controls and warm starts.
+- `mipgap`, `time_limit`, `threads`, `x_start`, `v_start`: MIP controls and warm starts. The `threads` parameter (default `1`) controls both CPLEX and BLAS threading for thread safety.
 - `compute_weights`: if `true`, return weights (refit or vanilla as per `use_refit`; default `true`).
 - `normalize_weights`: adds \(\sum x = 1\) inside MIQP and normalizes outputs (or refit weights); default `false` for scale‑invariant portfolios.
 - `use_refit`: if `true`, compute exact MVE Sharpe/weights on the final support; else keep MIQP portfolio `x` (default `false` for vanilla MIQP weights).
 - `epsilon`, `stabilize_Σ`, `verbose`, `do_checks`: numerics and I/O.
+
+**Thread safety.** The function temporarily sets BLAS threads to 1 during the solve and restores the original setting afterward, ensuring predictable CPU usage when `threads=1`.
 
 **Returns.**
 - `selection::Vector{Int}` — indices with \(v_i=1\).
